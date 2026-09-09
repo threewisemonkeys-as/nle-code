@@ -1,0 +1,34 @@
+# Python-generated files
+__pycache__/
+.pytest_cache/
+*.py[oc]
+build/
+dist/
+*.egg-info
+
+# The two interpreters, and the reason there are two.
+#
+# `.env-venv/` runs the harness: nle (which is a compiled NetHack 3.6.6) and the
+# gymnasium version it pins, plus what run.py and act.py need. It is the
+# interpreter run.py is launched under, so `act` in a workspace inherits it, and
+# that is how the daemon ends up holding a NetHack process. Rebuilt by
+# tools/make_env_venv.sh.
+#
+# `.agent-venv/` is what the workspace's `python` shim points at: numpy and
+# Pillow and nothing else, so that `import nle` from it fails. The package ships
+# the whole game — a second copy to consult offline, the glyph table, every
+# object and monster by name — so handing over the harness's own interpreter
+# would hand over an oracle. Rebuilt by tools/make_agent_venv.sh.
+.venv
+.env-venv/
+.agent-venv/
+
+# NetHack writes a recording wherever it is started from unless told otherwise.
+*.ttyrec*
+*.xlogfile
+
+# Secrets — never committed
+.env
+
+# Live workspaces, at the root only
+/runs/

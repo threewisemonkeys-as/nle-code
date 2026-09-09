@@ -1,0 +1,966 @@
+#!/usr/bin/env python3
+"""Launch coding-agent sessions to play NetHack.
+
+Adapted from cc_craftax's run.py, which took it from cc_humanrl, cc_autumn and
+arc-code. One game is one long session with its own workspace: the prompt, the log
+it writes, the screens it is given, and the notes it keeps. Games are independent,
+so they run concurrently.
+
+A run longer than one agent session is played by several of them: ``--stint`` says
+how many keystrokes each may play, and when a stint is spent that session is over
+and the launcher starts the next one from exactly where it stopped. ``--continue``
+does the same thing to a launch that has already finished, rebuilding its game from
+the recorded history and carrying it on under a larger ``--budget``.
+
+Each session's stream is recorded verbatim to ``agent_stream.jsonl`` — it is both
+the trace to debug from and the source of the cost figures.
+
+Two things differ from the Craftax port:
+
+* **A workspace can be continued after a session dies.** Craftax held its world as
+  a JAX state in a process, so a crashed daemon meant starting over. NetHack is a
+  pure function of two seeds and the keys pressed, so ``--replay`` (start again,
+  keep the notes) and ``--continue`` (carry on from exactly here) are both real,
+  and the second is the one to reach for.
+* **A seed is a character as well as a dungeon.** NetHack rolls a role, a race, an
+  alignment and a gender, and they differ enormously in how hard the game is. The
+  matrix is several seeds for that reason before it is several seeds for variance,
+  and every report records which character it was dealt.
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import secrets
+import sys
+import time
+from datetime import UTC, datetime
+from itertools import count
+from pathlib import Path
+
+from dotenv import load_dotenv
+from pydantic import BaseModel
+
+REPO = Path(__file__).resolve().parent
+# rig/ is not a package, so that a sandbox can overwrite any of it between builds.
+sys.path.insert(0, str(REPO / "rig"))
+
+from agents import AGENTS  # noqa: E402
+from audit import Audit, audit_session  # noqa: E402
+
+from act import DEFAULT_BUDGET, RESULT  # noqa: E402
+from nle_game import CHANNELS, DEFAULT_CHANNELS, VARIANTS  # noqa: E402
+
+# Outside the repository on purpose. A workspace under it puts this harness's source,
+# its git history, the interpreter that can import the package and every sibling
+# session one `..` away.
+RUNS = Path(os.environ.get("NLE_RUNS") or Path.home() / "nle-runs")
+# The interpreter the workspace's `python` shim points at: numpy and Pillow, and
+# deliberately not the package — `from nle import nethack` reaches the glyph table
+# and a second copy of the game. Built by tools/make_agent_venv.sh.
+AGENT_PYTHON = REPO / ".agent-venv" / "bin" / "python"
+
+# No I, O, 0 or 1: a label is read off a directory listing and typed back by hand.
+LABEL_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+LABEL_LEN = 5
+RIG = ".rig"
+LABELS = "labels.json"
+
+# How each channel is described in the brief. One sentence each, naming where the
+# files go and nothing about what is in them.
+SAID = {
+    "tty": "a screen of text, written to `screens/` as a text file",
+    "ansi": "the same screen with its colours, written to `ansi/` as a text file",
+    "pixels": "a picture of part of it, written to `frames/` as a PNG",
+    "symbolic": "several arrays of numbers, written to `symbolic/` as an .npz",
+}
+
+TASK = (
+    "Read CLAUDE.md, then play this game with ./act until `./act status` reports "
+    "the run is over. Work autonomously and do not stop to ask questions."
+)
+REPLAY_TASK = (
+    "A previous session played this game and its workspace is yours: read CLAUDE.md, "
+    "then recover what it established from notes.md and the logs-attempt*.txt it left "
+    "before acting. The game has been started again from the beginning, so what it "
+    "learned still applies. Continue with ./act until `./act status` reports the run "
+    "is over. Work autonomously and do not stop to ask questions."
+)
+# The difference from REPLAY_TASK is the whole of why this exists: there, the game
+# went back to the beginning and only the notes carried over. Here the run itself
+# carries over — same life, same inventory, same position — and the session before
+# this one stopped mid-thought because its stint ran out, not because it was done.
+# So the handover is stronger and the instruction has to be too: `logs.txt` is one
+# file for the whole run and is far too large to read, `./act status` and `./act
+# board` are where you are, and notes.md is what the last session managed to say.
+CONTINUE_TASK = (
+    "This run is already part-played and you are the session that continues it. Read "
+    "CLAUDE.md, then notes.md — a previous session wrote it for you and it is the "
+    "only thing it could hand you. `logs.txt` holds every action of the run so far "
+    "and is too big to read: its opening lines document its format, `./act status` "
+    "and `./act board` say where you are now, and anything else you want from it you "
+    "get with a script. The game is exactly where the last session left it — its "
+    "life, what it was carrying, where it stood. Any helper scripts in the workspace "
+    "are yours. Continue with ./act until `./act status` reports this session is "
+    "over, and before it does, leave notes.md fit for whoever comes next. Work "
+    "autonomously and do not stop to ask questions."
+)
+STREAM_LIMIT = 1 << 22  # single stream-json lines can be large
+
+
+class Report(BaseModel):
+    # `label` is what the workspace is called and the only one of these the session
+    # could have seen. `variant` and `seed` come from the launch's own record.
+    label: str
+    variant: str = "nethack"
+    seed: int = 0
+    obs: list[str] = list(DEFAULT_CHANNELS)
+    # Whether the brief named the game. Recorded on every report because it is the
+    # axis a later condition will vary, and because a number from one is not
+    # comparable with a number from the other.
+    opening: str = "named"
+    workspace: str
+    agent: str = "claude"
+    model: str = ""
+    exit_code: int = 0
+    seconds: float = 0.0
+    audit: Audit = Audit()
+    turns: int = 0
+    tool_calls: int = 0
+    # How many agent sessions played this run. More than one means it was stinted:
+    # every counter above is the sum over all of them, and every score below is the
+    # run's, because the run is the thing they were all playing.
+    sessions: int = 1
+    compactions: int = 0
+    cost_usd: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+
+    # -- the score, in the units the benchmark itself reports ----------------- #
+    # NetHack's score, in points. There is no maximum and so no percentage: the
+    # numbers to read these against are the median game on nethack.alt.org (836
+    # points), AutoAscend's median (5,422) and the Challenge's own leaderboard.
+    budget: int = 0
+    actions_used: int = 0
+    # The best single life, and every life in order — the second being the thing no
+    # RL baseline has an analogue for, since the agent carries notes across deaths
+    # where a policy carries weights.
+    best_episode: int = 0
+    # Mean over the lives the game ended. This is the one that sits beside the
+    # Challenge's median-score leaderboard, and `episodes_completed` is its n —
+    # often 1 or 2, which is why the matrix is several seeds rather than one long
+    # run.
+    episodes_completed: int = 0
+    mean_episode: float = 0.0
+    score: int = 0
+    episode_scores: list[int] = []
+    # How each life ended, in NetHack's vocabulary, and what character each was
+    # dealt. A Valkyrie and a Tourist are not the same game.
+    endings: list[str] = []
+    roles: list[str] = []
+    lives: int = 0
+    deaths: int = 0
+    quits: int = 0
+    turns: int = 0
+    unique_cells: int = 0
+    max_depth: int = 1
+    max_xplevel: int = 1
+
+    # Registered despite not being approved. Registration is not use — the audit's
+    # provider-reported counter is what says whether anything was reached — but a
+    # tool that turns up here is one the denylist missed.
+    unapproved_tools: list[str] = []
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0
+
+
+def child_env(api_key: str | None) -> dict[str, str]:
+    """A clean environment for a spawned agent.
+
+    The parent's CLAUDE_* variables identify *this* session; inheriting them would
+    make the child a continuation of it rather than a session of its own, and would
+    bill it accordingly. (arc-code, run.py)
+    """
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_"))
+    }
+    env.pop("ANT_API_KEY", None)
+    if api_key:
+        env["ANTHROPIC_API_KEY"] = api_key
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    return env
+
+
+# What the brief says the game is. Two conditions, and the default is `named`.
+#
+# Craftax and the humanRL games were withheld because a session that recognised one
+# had been handed the answer. NetHack cannot be withheld: the status line says
+# `Dlvl` and `HP` and `AC`, and one screen identifies it beyond doubt. Refusing to
+# name it would buy one action of ignorance and cost the comparison its meaning —
+# the Challenge's own leaderboard is bots written *by* people who knew the game,
+# and AutoAscend is made of nothing else. So the brief names it, and what the run
+# measures is whether recall converts into play through a keystroke interface.
+#
+# `blind` is kept because it is a real ablation and this harness family already
+# knows how to run it, not because it is the honest condition here.
+OPENING = {
+    "named": (
+        "You are playing NetHack, through a terminal, as a program rather than a\n"
+        "person. Nothing here tells you how to play it: what you know about this\n"
+        "game is yours, and what is in front of you is the authority."
+    ),
+    "blind": (
+        "You are playing a game you have never seen before.\n\n"
+        "Something in it is you. The rest of it is for you to work out — nothing\n"
+        "here names anything you will see, and nothing describes what any key does."
+    ),
+}
+
+
+def brief(channels: list[str], opening: str = "named") -> str:
+    """GAME.md with its two generated paragraphs filled in.
+
+    Generated rather than written, so a run with a different `--obs` cannot end up
+    with a brief describing a channel it does not have, and so the named and blind
+    conditions cannot drift apart in any way except the sentence that names the
+    game. The channel wording says where the files go and nothing about what is in
+    them.
+    """
+    said = [SAID[c] for c in CHANNELS if c in channels]
+    if len(said) == 1:
+        body = f"What you can see is {said[0]}, every time you act."
+    else:
+        body = (
+            "What you can see is written down every time you act, in more than one "
+            "form: " + ", ".join(said[:-1]) + f", and {said[-1]}."
+        )
+    return (
+        (REPO / "GAME.md").read_text()
+        .replace("{opening}", OPENING[opening])
+        .replace("{observations}", f"{body} That is the whole of what you are given.")
+    )
+
+
+def make_workspace(root: Path, label: str, channels: list[str], opening: str) -> Path:
+    """A workspace holds the prompt, a way to act, a way to look, and nothing else.
+
+    The brief says what this environment is; PROMPT.md says how to play and names no
+    environment. A new benchmark means a new brief and actuator — the prompt travels.
+
+    Two shims. `act` runs the actuator under this project's interpreter directly
+    rather than through `uv run`, because the agent invokes it hundreds of times.
+    `python` is not a convenience: the observation is a PNG, and the system
+    interpreter on this machine has neither numpy nor Pillow, so without it the run
+    is unplayable. It points at an interpreter that cannot import the package —
+    handing over the harness's own would hand over a second copy of the game.
+    """
+    if not AGENT_PYTHON.exists():
+        raise SystemExit(
+            f"run: no agent interpreter at {AGENT_PYTHON} — the observations cannot "
+            "be opened without one. Build it with tools/make_agent_venv.sh"
+        )
+    ws = root / label
+    ws.mkdir(parents=True)
+    (ws / "CLAUDE.md").write_text(
+        brief(channels, opening) + "\n" + (REPO / "PROMPT.md").read_text()
+    )
+    for name, interpreter, script in (
+        ("act", sys.executable, f' "{REPO / "act.py"}"'),
+        ("python", AGENT_PYTHON, ""),
+    ):
+        shim = ws / name
+        shim.write_text(f'#!/bin/sh\nexec "{interpreter}"{script} "$@"\n')
+        shim.chmod(0o755)
+    return ws
+
+
+def refresh_brief(ws: Path, opening: str) -> None:
+    """Rewrite a kept workspace's brief from the current GAME.md and PROMPT.md.
+
+    A run that keeps its workspace keeps the CLAUDE.md whatever version of the
+    harness started it wrote, and a brief that contradicts the log is worse than a
+    stale one: a session told "the budget is the whole of what you have" beside a
+    preamble saying it has a stint of it has to decide which to believe.
+
+    The channels come from the record and not from the arguments, for the same
+    reason the game does — they are part of what this run is. Nothing else in the
+    workspace is touched: notes.md and the helper scripts are the session's, and
+    CLAUDE.md is the harness's.
+    """
+    channels = list(json.loads((ws / "state.json").read_text())["obs"])
+    (ws / "CLAUDE.md").write_text(
+        brief(channels, opening) + "\n" + (REPO / "PROMPT.md").read_text()
+    )
+
+
+def credential_life(path: Path) -> tuple[float, float]:
+    """When a stored login's access and refresh tokens run out, as POSIX seconds.
+
+    ``(0, 0)`` for anything missing, unreadable or malformed, which makes all three
+    the same answer: this credential is not worth keeping.
+    """
+    try:
+        oauth = json.loads(path.read_text()).get("claudeAiOauth") or {}
+        return (float(oauth.get("expiresAt") or 0) / 1000,
+                float(oauth.get("refreshTokenExpiresAt") or 0) / 1000)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0, 0.0
+
+
+def session_config(root: Path, label: str) -> Path:
+    """A config directory of this session's own, seeded with the CLI's credential.
+
+    The CLI keeps its sessions and its memory of a project under its config
+    directory, which by default is the operator's ``~/.claude`` — where the
+    operator's own notes on this very harness live. A session is told about its
+    memory directory, so listing the parent is a short walk to a sibling project's
+    notes; pointing the whole tree somewhere else removes that walk.
+
+    Mitigation and not prevention: an absolute path still reaches the real one, and
+    until a sandbox exists only the audit stands there.
+
+    The credential is a symlink to the operator's until a session refreshes a token,
+    at which point the CLI writes the file anew and the symlink becomes a copy. Which
+    of the two to keep is decided by which lasts longer, and both directions of that
+    have been wrong here before.
+
+    Leaving the copy alone was wrong: it expires where the operator's does not, so a
+    launch resumed the next day failed to authenticate in every session that had ever
+    refreshed. Re-linking unconditionally is wrong the other way, and only shows up on
+    a run long enough to need several sessions: an access token lasts about eight
+    hours and nothing refreshes the operator's file while a chain is running, so from
+    the second session on the copy is the *newer* of the two and relinking hands the
+    next session a token that has already expired.
+
+    So: keep whichever expires later. A chained run then sustains itself — session one
+    seeds from the operator's file, refreshes when it needs to, and every session
+    after inherits the refreshed copy — for as long as the refresh token lives, which
+    is about a month rather than about eight hours.
+    """
+    config = root / ".sessions" / label / ".claude"
+    config.mkdir(parents=True, exist_ok=True)
+    credential = Path.home() / ".claude" / ".credentials.json"
+    link = config / ".credentials.json"
+    if not credential.exists():
+        return config
+    if link.is_symlink() and link.resolve() == credential.resolve():
+        return config
+    if credential_life(link)[0] > credential_life(credential)[0]:
+        return config
+    link.unlink(missing_ok=True)
+    link.symlink_to(credential)
+    return config
+
+
+async def act(ws: Path, *args: str) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(REPO / "act.py"),
+        *args,
+        cwd=ws,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    text = out.decode()
+    if proc.returncode != 0:
+        raise RuntimeError(f"act {' '.join(args)} failed in {ws}:\n{text}")
+    return text
+
+
+# --------------------------------------------------------------------------- #
+# Which game is which workspace
+# --------------------------------------------------------------------------- #
+
+
+def rig_dir(root: Path) -> Path:
+    """Where the launch keeps what no session may read.
+
+    A dotted directory rather than the launch root, because the root is one `..`
+    from every workspace and a listing of it would otherwise carry the mapping, the
+    summary and every other session's score.
+    """
+    found = root / RIG
+    found.mkdir(parents=True, exist_ok=True)
+    return found
+
+
+def write_report(root: Path, report: "Report") -> Path:
+    """The session's verdict, kept out of the workspace it is about.
+
+    It carries the achievement set by name, which is the tech tree — and a replay is
+    *told* to read what its predecessor left behind, so this would be waiting for it.
+
+    A previous verdict is rotated rather than replaced, for the same reason the log
+    is: a replay must not overwrite the result of the session it is replaying.
+    """
+    out = rig_dir(root) / "reports"
+    out.mkdir(exist_ok=True)
+    path = out / f"{report.label}.json"
+    if path.exists():
+        n = 1 + len(list(out.glob(f"{report.label}-attempt*.json")))
+        path.rename(out / f"{report.label}-attempt{n}.json")
+    path.write_text(report.model_dump_json(indent=2))
+    return path
+
+
+def assign_labels(root: Path, plan: list[tuple[str, int]]) -> dict[str, tuple[str, int]]:
+    """An opaque name for each (variant, seed), recorded outside every workspace.
+
+    Drawn at random per launch rather than derived from the spec: a name that said
+    which seed it was would let a session recognise a game it had played before, and
+    a launch that ran the same seed twice would have two workspaces announcing it.
+    """
+    path = rig_dir(root) / LABELS
+    known = {
+        label: (row["variant"], row["seed"])
+        for label, row in json.loads(path.read_text()).items()
+    } if path.exists() else {}
+    have = {spec: label for label, spec in known.items()}
+    for spec in plan:
+        if spec in have:
+            continue
+        while (label := "".join(secrets.choice(LABEL_CHARS) for _ in range(LABEL_LEN))) in known:
+            pass
+        known[label], have[spec] = spec, label
+    path.write_text(
+        json.dumps({k: {"variant": v, "seed": s} for k, (v, s) in known.items()}, indent=2)
+    )
+    return known
+
+
+# --------------------------------------------------------------------------- #
+# Playing
+# --------------------------------------------------------------------------- #
+
+
+def played(ws: Path) -> int:
+    """Actions this run has spent, from the record the actuator keeps in the open."""
+    state = ws / "state.json"
+    if not state.exists():
+        return 0
+    return int(json.loads(state.read_text())["actions_used"])
+
+
+async def one_session(
+    argv: list[str],
+    ws: Path,
+    env: dict[str, str],
+    report: "Report",
+    agent,
+) -> tuple[str, int]:
+    """Run one agent session to its end, folding its stream into the run's telemetry.
+
+    Appends to `agent_stream.jsonl` rather than truncating it, because the sessions
+    of a stinted run are one run: the audit reads the whole file and the totals in
+    the report are the run's, not the last session's.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=ws,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,  # codex reads stdin if it is a pipe
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=STREAM_LIMIT,
+    )
+    # Line-buffered: a run that is killed rather than finished still leaves a
+    # readable transcript, and the file can be watched while it plays.
+    with (ws / "agent_stream.jsonl").open("a", buffering=1) as stream:
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace")
+            stream.write(line)
+            absorb(agent, report, line)
+    stderr = (await proc.stderr.read()).decode(errors="replace")
+    await proc.wait()
+    return stderr, proc.returncode or 0
+
+
+async def play(
+    label: str,
+    spec: tuple[str, int],
+    root: Path,
+    args: argparse.Namespace,
+    env: dict[str, str],
+    siblings: list[str],
+    limit: asyncio.Semaphore,
+) -> Report:
+    variant, seed = spec
+    budget = args.budget or DEFAULT_BUDGET[variant]
+    # Outside the workspace, and somewhere the launcher can find again: it holds
+    # the environment's log, NetHack's own recordings of every life, and the run's
+    # league table across them.
+    env_dir = root / ".envs" / label
+    async with limit:
+        if args.carry_on:
+            ws, how = root / label, "resume"
+            refresh_brief(ws, args.opening)
+            print(f"[{label}] carrying the recorded run on to {budget} actions",
+                  flush=True)
+        elif args.replay:
+            ws, how = root / label, "again"
+            refresh_brief(ws, args.opening)  # before `act init --again`, which clears state.json
+            print(f"[{label}] replaying with the last session's notes", flush=True)
+        else:
+            ws, how = make_workspace(root, label, args.obs, args.opening), "fresh"
+
+        # On a kept workspace the channels are the record's, not the arguments' —
+        # `act --resume` ignores `--obs` for the same reason, and a report that
+        # disagreed with the run would be the only place the two differed.
+        channels = (list(json.loads((ws / "state.json").read_text())["obs"])
+                    if how == "resume" else list(args.obs))
+        report = Report(label=label, variant=variant, seed=seed, obs=channels,
+                        opening=args.opening, workspace=str(ws), agent=args.agent,
+                        model=args.model, budget=budget)
+        agent = AGENTS[args.agent]
+
+        def briefed(n: int) -> str:
+            """What session `n` is told it is walking into.
+
+            Only a first session ever meets a game at action zero, and only the
+            first session of a `--replay` meets one that was started over. Every
+            other session in a launch is continuing a run that is already going.
+            """
+            if n > 1 or how == "resume":
+                return CONTINUE_TASK
+            return REPLAY_TASK if how == "again" else TASK
+
+        def opened(n: int) -> list[str]:
+            """How the environment is started for session `n` of this run."""
+            out = [
+                "init",
+                "--variant", variant,
+                "--seed", str(seed),
+                "--budget", str(budget),
+                "--stint", str(args.stint),
+                "--obs", *args.obs,
+                "--env-dir", str(env_dir),
+            ]
+            if args.fresh_world:
+                out.append("--fresh-world")
+            # Only the first session of a launch decides how the game begins. Every
+            # session after it resumes, whatever the first one did — including a
+            # fresh run, whose second session picks up the state its first left.
+            if n > 1 or how == "resume":
+                out.append("--resume")
+            elif how == "again":
+                out.append("--again")
+            return out
+
+        if args.dry_run:
+            await act(ws, *opened(1))
+            await act(ws, "stop")
+            shown = " ".join(agent.argv(briefed(1), args.model, ws)[:6])
+            print(f"[{label}] ready, not played: {shown} ...", flush=True)
+            return report
+
+        started = time.monotonic()
+        stderr, idle = "", 0
+        try:
+            # One run, played by as many sessions as its stint divides it into. The
+            # environment is stopped and rebuilt between them rather than held open,
+            # which costs a replay of the history each time (about 3ms an action) and
+            # buys two things worth more than that: a session cannot mint itself more
+            # actions, because the only thing that grants a stint is a launcher
+            # starting the daemon; and every handover is a clean process, which over
+            # twenty hours matters more than the minutes it costs.
+            for n in count(1):
+                before = played(ws)
+                await act(ws, *opened(n))
+                argv = agent.argv(briefed(n), args.model, ws)
+                # Re-seeded per session and not per run: the CLI replaces the
+                # symlink with a copy of whatever the credential was when it last
+                # refreshed a token, and a chain of sessions can outlive that by
+                # many hours (F13).
+                session_env = env | {"CLAUDE_CONFIG_DIR": str(session_config(root, label))}
+                stderr, report.exit_code = await one_session(
+                    argv, ws, session_env, report, agent)
+                report.sessions = n
+                if report.exit_code:
+                    # Not fatal to the run. The actions it played are recorded and
+                    # the next session rebuilds the game from them; what is lost is
+                    # whatever it had not written down.
+                    print(f"[{label}] session {n} exited {report.exit_code}: "
+                          f"{' '.join(stderr.split())[-200:]}", flush=True)
+
+                state = json.loads((ws / "state.json").read_text())
+                if state["terminal"]:
+                    break
+                if not args.stint:
+                    # Without a stint a run is one session, which is what every run
+                    # was before stints existed. A session that stops with budget
+                    # left has decided it is finished, and starting another would be
+                    # the launcher overruling it rather than continuing it.
+                    break
+                if state["actions_used"] <= before:
+                    # It played nothing at all: an API error at startup, an expired
+                    # credential, a session that read the workspace and gave up.
+                    # Costing almost nothing, a retry or two is worth it on a run
+                    # meant to go unattended for hours — but a chain that cannot make
+                    # progress must stop rather than spend the night failing.
+                    idle += 1
+                    if idle > args.retries:
+                        print(f"[{label}] session {n} played no actions, and neither "
+                              f"did the {args.retries} before it — stopping the chain "
+                              f"at {state['actions_used']}/{budget}", flush=True)
+                        break
+                    print(f"[{label}] session {n} played no actions — trying again "
+                          f"({idle} of {args.retries})", flush=True)
+                else:
+                    idle = 0
+                if n >= args.max_sessions:
+                    print(f"[{label}] {n} sessions is the limit — stopping at "
+                          f"{state['actions_used']}/{budget}", flush=True)
+                    break
+                print(f"[{label}] session {n} handed over at "
+                      f"{state['actions_used']}/{budget} actions", flush=True)
+        finally:
+            # The environment is a daemon holding a JAX process; a batch of six would
+            # otherwise leave six behind, each with its compiled step function.
+            #
+            # Not allowed to raise. The first real pilot ended with a daemon that had
+            # already died, `act stop` failed, the exception left this block, and the
+            # report — read and written below — was never produced at all. A run that
+            # played 2757 actions reported nothing because its shutdown was untidy.
+            report.seconds = time.monotonic() - started
+            try:
+                await act(ws, "stop")
+            except (RuntimeError, OSError) as exc:
+                print(f"[{label}] the environment did not shut down cleanly: "
+                      f"{' '.join(str(exc).split())[:200]}", flush=True)
+
+        if stderr.strip():
+            (ws / "agent_stderr.log").write_text(stderr)
+        # From the actuator's private record rather than state.json, which
+        # deliberately carries neither the per-life table nor the aggregate.
+        # Written after every action, so it exists unless the session never played
+        # one.
+        result = env_dir / RESULT
+        if not result.exists():
+            print(f"[{label}] no actions were played — nothing to score", flush=True)
+            report.exit_code = report.exit_code or 1
+            write_report(root, report)
+            return report
+        record = json.loads(result.read_text())
+        for field in ("actions_used", "best_episode", "episodes_completed",
+                      "mean_episode", "score", "episode_scores", "endings", "roles",
+                      "lives", "deaths", "quits", "turns", "unique_cells",
+                      "max_depth", "max_xplevel"):
+            setattr(report, field, record[field])
+        report.audit = audit_session(
+            ws / "agent_stream.jsonl", agent, own=label, siblings=siblings,
+            root=str(root), repo=str(REPO),
+        )
+        write_report(root, report)
+
+        flag = "" if report.ok else f" EXIT {report.exit_code}"
+        print(
+            f"[{label}] {report.variant} seed {report.seed}: "
+            f"{report.mean_episode:.0f} mean of {report.episodes_completed}, "
+            f"{report.best_episode} best life, dlvl {report.max_depth}, "
+            f"xp {report.max_xplevel}, {report.actions_used}/{report.budget} keys, "
+            f"{report.lives} lives ({report.deaths} died, {report.quits} quit), "
+            f"{report.turns} game turns, {report.tool_calls} tool calls over "
+            f"{report.sessions} session(s), ${report.cost_usd:.2f}, "
+            f"{report.seconds / 60:.1f} min{flag}",
+            flush=True,
+        )
+        if not report.ok:
+            print(f"[{label}] stderr tail: {stderr.strip()[-500:]}", flush=True)
+        if report.unapproved_tools:
+            print(
+                f"[{label}] registered but not approved: "
+                f"{', '.join(report.unapproved_tools)} — extend Claude.DENIED",
+                flush=True,
+            )
+        if report.audit.named_the_game:
+            # Recall, not misconduct. Printed because it is the line between a
+            # session that read the screen and one that remembered the game.
+            print(f"[{label}] named the game: {report.audit.named_the_game[:160]}",
+                  flush=True)
+        if not report.audit.clean:
+            print(f"[{label}] AUDIT FAILED — this run is not evidence:", flush=True)
+            for name, hits in report.audit.findings.items():
+                # Flattened: a hit is a 200-character excerpt of what the session
+                # ran, and a heredoc's newlines would otherwise spill the finding
+                # across a dozen unprefixed lines of the launch log.
+                excerpt = " ".join(hits[0].split())
+                print(f"[{label}]   {name}: {excerpt[:140]}", flush=True)
+        return report
+
+
+def absorb(agent, report: Report, line: str) -> None:
+    """Fold one streamed event into the run's telemetry.
+
+    Also reads back what the session registered. Which tools exist depends on the CLI
+    version and on the environment it starts in, so holding the agent to a handful of
+    them cannot rest on a denylist written here being complete: this records what
+    actually turned up outside the approved set.
+    """
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    if event.get("type") == "system" and event.get("subtype") == "init":
+        approved = set(getattr(agent, "ALLOWED", "").split(","))
+        report.unapproved_tools = sorted(set(event.get("tools") or []) - approved)
+    agent.absorb(report, event)
+
+
+def summarise(reports: list[Report], root: Path) -> None:
+    """The table, written where no session can read it.
+
+    Under `.rig/` rather than the launch root for the same reason the label mapping
+    is: the root is one `..` from every workspace, and the summary carries every
+    session's achievement set.
+    """
+    rig_dir(root).joinpath("summary.json").write_text(
+        json.dumps([r.model_dump() for r in reports], indent=2)
+    )
+    if not reports:
+        print("\nno game produced a report — every one of them failed to run")
+        return
+    print(f"\n{'game':14}  label  mean    n   best   keys  turns  lives  died  "
+          f"dlvl  xp  sess   cost  minutes  character")
+    for r in sorted(reports, key=lambda r: (r.variant, r.seed)):
+        mark = "  AUDIT FAILED" if not r.audit.clean else ""
+        game = f"{r.variant}:{r.seed}"
+        print(
+            f"{game:14}  {r.label}  {r.mean_episode:>6.0f}  {r.episodes_completed:>3}  "
+            f"{r.best_episode:>5}  {r.actions_used:>5}  {r.turns:>5}  {r.lives:>5}  "
+            f"{r.deaths:>4}  {r.max_depth:>4}  {r.max_xplevel:>2}  {r.sessions:>4}  "
+            f"${r.cost_usd:>5.2f}  {r.seconds / 60:>7.1f}  "
+            f"{(r.roles[0] if r.roles else ''):.34}{mark}"
+        )
+    best = max(r.best_episode for r in reports)
+    frames = sum(r.audit.frames_in_context for r in reports)
+    named = [r.label for r in reports if r.audit.named_the_game]
+    print(
+        f"\n{len(reports)} games, best single life {best} points "
+        f"(the median game on nethack.alt.org scores 836), "
+        f"${sum(r.cost_usd for r in reports):.2f}, artifacts in {root}"
+    )
+    dirty = [r.label for r in reports if not r.audit.clean]
+    print(
+        f"{'AUDIT FAILED: ' + ', '.join(dirty) if dirty else 'audit clean'}; "
+        f"{frames} observations read into context rather than parsed; "
+        f"{len(named)}/{len(reports)} named the game"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# What to play
+# --------------------------------------------------------------------------- #
+
+
+def specs(args: argparse.Namespace) -> list[tuple[str, int]]:
+    """`nethack` or `nethack:3` -> (variant, seed) pairs.
+
+    A bare variant takes `--seed`. Naming one variant several times over with
+    different seeds is the normal shape of a matrix — the Challenge's own metric is
+    a median over games, and here a seed is a character as well as a dungeon.
+    """
+    out = []
+    for token in args.games:
+        variant, _, seed = token.partition(":")
+        if variant not in VARIANTS:
+            raise SystemExit(f"run: {variant!r} is not one of {list(VARIANTS)}")
+        out.append((variant, int(seed) if seed else args.seed))
+    if not out:
+        out = [("nethack", args.seed)]
+    return list(dict.fromkeys(out))
+
+
+def unfinished(root: Path) -> list[tuple[str, tuple[str, int]]]:
+    """Sessions in a launch directory whose run never reached an ending.
+
+    A workspace names nothing, so which game it holds comes from the launch's own
+    record rather than from anything inside it.
+    """
+    path = rig_dir(root) / LABELS
+    if not path.exists():
+        raise SystemExit(f"run: {path} is missing — this is not a launch directory")
+    known = json.loads(path.read_text())
+    out = []
+    for label, row in known.items():
+        state_file = root / label / "state.json"
+        if not state_file.exists():
+            continue
+        if json.loads(state_file.read_text())["terminal"]:
+            continue
+        out.append((label, (row["variant"], row["seed"])))
+    return out
+
+
+def continuable(root: Path) -> list[tuple[str, tuple[str, int]]]:
+    """Worlds in a launch that can be carried on from exactly where they stopped.
+
+    Any game that has played an action, *including* one that reached its ending —
+    a run that spent its budget is the case this exists for, since the way a run is
+    extended is to resume it under a larger one. `unfinished` asks the other
+    question, which games never reached an ending at all, and is what `--replay`
+    wants: there the game starts over and only the notes survive.
+    """
+    path = rig_dir(root) / LABELS
+    if not path.exists():
+        raise SystemExit(f"run: {path} is missing — this is not a launch directory")
+    known = json.loads(path.read_text())
+    return [(label, (row["variant"], row["seed"]))
+            for label, row in known.items() if played(root / label) > 0]
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser(prog="run", description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "games", nargs="*",
+        help="variants, optionally with a seed: nethack nethack:1 score:3. "
+             "With none, nethack at --seed",
+    )
+    parser.add_argument(
+        "--replay", metavar="LAUNCH_DIR",
+        help="play every unfinished game in a previous launch again, keeping its notes",
+    )
+    parser.add_argument(
+        "--continue", dest="carry_on", metavar="LAUNCH_DIR",
+        help="carry every played game in a previous launch on from where it "
+             "stopped, under a larger --budget. The dungeon, the life and the "
+             "inventory are exactly as they were left",
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--budget", type=int, default=0,
+                        help=f"default {DEFAULT_BUDGET} by variant")
+    parser.add_argument(
+        "--stint", type=int, default=0,
+        help="actions one agent session may play before another takes over the same "
+             "run (0: the whole budget, in one session). A run longer than a session "
+             "needs this",
+    )
+    parser.add_argument("--max-sessions", type=int, default=100,
+                        help="how many sessions a stinted run may chain")
+    parser.add_argument("--retries", type=int, default=2,
+                        help="sessions in a row that may play nothing before the "
+                             "chain gives up")
+    parser.add_argument("--obs", nargs="+", choices=CHANNELS, default=list(DEFAULT_CHANNELS),
+                        help="which of the package's own observations the sessions get")
+    parser.add_argument("--opening", choices=sorted(OPENING), default="named",
+                        help="whether the brief names the game (default) or withholds "
+                             "it, which is an ablation and not the honest condition")
+    parser.add_argument("--fresh-world", action="store_true",
+                        help="roll a new character and dungeon on each life instead "
+                             "of dealing this one again")
+    parser.add_argument("--agent", default="claude", choices=sorted(AGENTS))
+    parser.add_argument("--model", help="model for the agent sessions (default: the agent's own)")
+    parser.add_argument("-c", "--concurrency", type=int, default=4, help="games at once")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="build the workspaces and start the games, play none",
+    )
+    args = parser.parse_args()
+
+    load_dotenv(REPO.parents[1] / ".env")
+    args.model = args.model or AGENTS[args.agent].model
+    api_key = os.environ.get("ANT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    if args.agent == "claude" and not api_key:
+        # arc-code hands each session its own key so the bill is per session. With no
+        # key the CLI falls back to its own stored login, which works but bills a plan
+        # rather than a request — so the cost column becomes whatever the CLI chooses
+        # to report, not a measurement.
+        if not args.dry_run:
+            print(
+                "run: no ANT_API_KEY — sessions will use the CLI's own stored login, "
+                "and the cost figures are only as good as what it reports",
+                flush=True,
+            )
+        # Outside that guard on purpose: a dry run is where you would want to find
+        # out that the login will not last the night, before committing the money.
+        access, refresh = credential_life(Path.home() / ".claude" / ".credentials.json")
+        now = time.time()
+        if not refresh:
+            print("run: no stored login found either — sessions will fail to "
+                  "authenticate. Log in, or set ANT_API_KEY.", flush=True)
+        elif refresh <= now:
+            print(f"run: the stored login's refresh token expired "
+                  f"{(now - refresh) / 86400:.1f} days ago — every session will fail "
+                  f"to authenticate. Log in again before starting.", flush=True)
+        else:
+            # The access token is the short one and it is *not* the one that has to
+            # outlast the run: sessions refresh their own and each inherits the last
+            # one's (see session_config). The refresh token is the deadline.
+            print(f"run: stored login — access token {(access - now) / 3600:+.1f}h, "
+                  f"refresh token {(refresh - now) / 86400:.1f} days. Sessions "
+                  f"refresh their own, so the refresh token is the one that has to "
+                  f"outlast the run.", flush=True)
+
+    if args.replay and args.carry_on:
+        raise SystemExit(
+            "run: --replay starts the game over and --continue carries it on — "
+            "they are opposites"
+        )
+    if args.carry_on:
+        root = Path(args.carry_on)
+        if not args.budget:
+            raise SystemExit(
+                "run: --continue needs a --budget to continue to. Resuming under the "
+                "budget a run already spent would rebuild it and stop."
+            )
+        plan = continuable(root)
+        spent = {label: played(root / label) for label, _ in plan}
+        plan = [(label, spec) for label, spec in plan if spent[label] < args.budget]
+        for label, done in sorted(spent.items()):
+            if done >= args.budget:
+                print(f"[{label}] already played {done} of the {args.budget} asked "
+                      f"for — nothing to continue", flush=True)
+        if not plan:
+            raise SystemExit(f"run: nothing in {root} to continue to {args.budget}")
+        print(f"continuing {len(plan)} games in {root} to {args.budget} keys")
+    elif args.replay:
+        root = Path(args.replay)
+        plan = unfinished(root)
+        if not plan:
+            raise SystemExit(f"run: nothing left to play in {root}")
+        print(f"replaying {len(plan)} games in {root}")
+    else:
+        root = RUNS / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        chosen = specs(args)
+        plan = [(label, spec) for label, spec in assign_labels(root, chosen).items()
+                if spec in chosen]
+
+    longest = max(args.budget or DEFAULT_BUDGET[variant] for _, (variant, _) in plan)
+    if not args.stint and longest > 2 * DEFAULT_BUDGET["nethack"]:
+        print(
+            f"run: {longest} keys with no --stint is one agent session playing all "
+            f"of them, which is more than one process should be asked to hold. "
+            f"--stint {DEFAULT_BUDGET['nethack']} plays it as a chain of sessions.",
+            flush=True,
+        )
+
+    env = child_env(api_key)
+    limit = asyncio.Semaphore(args.concurrency)
+    siblings = [label for label, _ in plan]
+    # One session blowing up must not discard the others. Failures are reported and
+    # still fail the run; they just do not take the results with them.
+    results = await asyncio.gather(
+        *(play(label, spec, root, args, env, siblings, limit) for label, spec in plan),
+        return_exceptions=True,
+    )
+    reports = [r for r in results if isinstance(r, Report)]
+    for (label, spec), result in zip(plan, results, strict=True):
+        if not isinstance(result, Report):
+            print(f"[{label}] {spec[0]}:{spec[1]} FAILED TO RUN: {result}", flush=True)
+
+    if not args.dry_run:
+        summarise(reports, root)
+    print(f"workspaces in {root}")
+    lost = len(plan) - len(reports)
+    return 0 if not lost and all(r.ok and r.audit.clean for r in reports) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
