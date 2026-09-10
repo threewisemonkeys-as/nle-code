@@ -90,13 +90,18 @@ SUSPICIOUS = {
     ),
     # This launch's own bookkeeping: which opaque workspace is which game, what the
     # other sessions scored, and the league table across this run's lives.
-    # `nle-runs` only bites after the scrub below has removed this launch's own
+    # `agent-runs` only bites after the scrub below has removed this launch's own
     # root: naming your own launch directory is unavoidable, naming somebody else's
     # is reaching for another experiment's results.
+    #
+    # `.bin/` is not here, and must not be: it holds the neutral names the
+    # workspace's own shims are written in terms of (F18), so a session that printed
+    # `act` would be failed for reading what it was handed. What is in it is a
+    # symlink to the actuator, and *following* that is caught by "the package".
     "the record": (
         r"labels\.json|summary\.json|result\.json|report\.json"
         r"|/\.rig/|/\.envs/|/\.sessions/|daemon\.log|ttyrec"
-        r"|notes/nle-|nle-runs"
+        r"|notes/nle-|agent-runs"
     ),
     # The operator's own notes sit under ~/.claude, one file per finding, and
     # several are about this very harness. A session runs with the operator's HOME

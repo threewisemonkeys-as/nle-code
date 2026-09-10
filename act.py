@@ -87,6 +87,11 @@ class RunState(BaseModel):
     seed: int = 0
     obs: list[str] = list(DEFAULT_CHANNELS)
     fresh_world: bool = False
+    # Whether the game is allowed to name itself in the observations. Off by
+    # default: the opening screen says `welcome to NetHack!` and so does `v`, and a
+    # session that was not told what it is playing should not be told by the first
+    # frame either (F18). It is `PRIVATE` for the same reason `variant` is.
+    blind: bool = True
     budget: int = 0
     env_dir: str = ""
 
@@ -134,9 +139,15 @@ class RunState(BaseModel):
     deaths: int = 0
     quits: int = 0
 
+    # `variant` is here for a reason that took a moment to see: it is the string
+    # "nethack", and it is written into a file that sits in the workspace next to
+    # the log the session is told to read. Withholding the name from the brief and
+    # from the screen and then leaving it in `state.json` would be withholding
+    # nothing. What the run *is* lives in the record beside the environment, which
+    # is also where `pick_up` reads it back from.
     PRIVATE: ClassVar[set[str]] = {
-        "env_dir", "episodes", "score", "max_depth", "max_xplevel",
-        "unique_cells", "turns", "deaths", "quits", "reward",
+        "env_dir", "variant", "blind", "episodes", "score", "max_depth",
+        "max_xplevel", "unique_cells", "turns", "deaths", "quits", "reward",
     }
 
     def save(self, ws: Path) -> None:
@@ -361,6 +372,7 @@ class Session:
             seed=state.seed,
             obs=tuple(state.obs),
             fresh_world=state.fresh_world,
+            blind=state.blind,
             # NetHack's own recording of every life, in the format its `ttyplay`
             # reads, plus the xlogfile it writes when a game ends (F16). Beside the
             # environment and never in the workspace: the xlogfile names how each
@@ -736,6 +748,7 @@ def start(ws: Path, args: argparse.Namespace, env_dir: Path) -> Session:
         seed=args.seed,
         obs=list(args.obs),
         fresh_world=args.fresh_world,
+        blind=not args.named,
         budget=args.budget or DEFAULT_BUDGET[args.variant],
         env_dir=str(env_dir),
     )
@@ -749,21 +762,33 @@ def pick_up(ws: Path, args: argparse.Namespace, env_dir: Path) -> Session:
     """A run that is already part-played, rebuilt from its own record.
 
     What the run *is* — the variant, the seed, the channels, whether each life gets a
-    fresh world — comes from the record and never from the arguments. Those four
-    define the world the recorded history is a history of, and a launcher that
-    disagreed with them would rebuild a different world and call it the same run.
-    The budget and the stint are the launcher's to set, and are the only reason this
-    exists: a run is extended by resuming it with a larger budget.
+    fresh game, whether the game may name itself — comes from **the record beside the
+    environment** and never from the arguments. Those five define the game the
+    recorded history is a history of, and a launcher that disagreed with them would
+    rebuild a different game and call it the same run.
+
+    From the record and not from `state.json`, because `state.json` sits in the
+    workspace and no longer carries the variant or the blind flag: they are the two
+    fields that would tell a session what it is playing (F18). The budget and the
+    stint are the launcher's to set, and are the only reason this exists: a run is
+    extended by resuming it with a larger budget.
     """
-    saved = ws / STATE
-    if not saved.exists():
+    if not (ws / STATE).exists():
         raise ActError(f"{ws} holds no run to resume — there is no {STATE}")
-    was = json.loads(saved.read_text())
+    record = Path(env_dir, RESULT)
+    if not record.exists():
+        raise ActError(
+            f"{ws} holds a run but {record} does not — the record beside the "
+            f"environment is what says which game this is a run of, so a resume "
+            f"needs the --env-dir the run was played under"
+        )
+    was = json.loads(record.read_text())
     state = RunState(
         variant=was["variant"],
         seed=was["seed"],
         obs=list(was["obs"]),
         fresh_world=was["fresh_world"],
+        blind=bool(was.get("blind", True)),
         budget=args.budget or was["budget"],
         env_dir=str(env_dir),
         sessions=int(was.get("sessions", 1)) + 1,
@@ -897,6 +922,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     ]
     if args.fresh_world:
         argv.append("--fresh-world")
+    if args.named:
+        argv.append("--named")
     if args.resume:
         argv.append("--resume")
     env_dir = Path(args.env_dir or tempfile.mkdtemp(prefix="act-env-"))
@@ -952,6 +979,11 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--fresh-world", action="store_true",
                        help="roll a new character and dungeon on each life instead "
                             "of dealing this one again")
+        p.add_argument("--named", action="store_true",
+                       help="let the game name itself in the observations. The "
+                            "default redacts that one word, because a session that "
+                            "was not told what it is playing should not be told by "
+                            "the first screen either")
         p.add_argument("--stint", type=int, default=0,
                        help="actions one session may play before another takes over "
                             "(0: the whole budget, in one session)")

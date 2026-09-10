@@ -215,6 +215,66 @@ def test_reward_is_the_score_moving():
     made.close()
 
 
+# -- the blind condition ----------------------------------------------------- #
+
+
+def test_a_blind_run_is_not_told_by_the_game_what_the_game_is():
+    """The opening screen says `welcome to NetHack!` and so does `v` (F18).
+
+    A brief that withholds the name, over observations that publish it, withholds
+    nothing — so the blind condition redacts the word from every text channel. This
+    is the only place the harness alters what the package produces.
+    """
+    made = NleGame(seed=3, obs=("tty", "ansi", "symbolic"))
+    assert made.blind, "a run is blind unless it is told otherwise"
+    assert "NetHack" not in made.screen()
+    assert "*******" in made.screen()
+    made.play("v")  # the version line, which names it again
+    assert "nethack" not in made.screen().lower()
+    assert "nethack" not in made.ansi().lower()
+    assert b"nethack" not in bytes(made.symbolic()["message"]).lower()
+    made.close()
+
+
+def test_a_named_run_leaves_the_game_alone():
+    made = NleGame(seed=3, blind=False)
+    assert "NetHack" in made.screen()
+    made.close()
+
+
+def test_the_redaction_moves_nothing_on_the_screen():
+    """Same length, so an 80-column screen stays an 80-column screen: a map row that
+    shifted by a character would be a different map."""
+    blind, named = NleGame(seed=3), NleGame(seed=3, blind=False)
+    for _ in range(40):
+        blind.play("l")
+        named.play("l")
+    # `v` puts the name back on the screen, in the middle of a line this time: the
+    # welcome message is long gone by action 40.
+    blind.play("v")
+    named.play("v")
+    for one, two in zip(blind.screen().splitlines(), named.screen().splitlines(), strict=True):
+        assert len(one) == len(two)
+    assert blind.screen() != named.screen(), "nothing was redacted at all"
+    assert blind.screen().replace("*******", "NetHack") == named.screen()
+    for made in (blind, named):
+        made.close()
+
+
+def test_blindness_changes_no_dynamics():
+    """It is a redaction of a word in the observation, not a change to the game."""
+    keys = ["l", "j", "cr", "h", "k", "s", "v", "esc"] * 8
+    seen = []
+    for blind in (True, False):
+        made = NleGame(seed=8, blind=blind)
+        for key in keys:
+            made.play(key)
+        episode = made.episodes[-1]
+        seen.append((episode.score, episode.turns, episode.depth, made.unique_cells))
+        made.close()
+    assert seen[0] == seen[1]
+
+
 def test_the_score_task_is_a_different_game():
     """23 actions, and NLE steps past the menus itself."""
     made = NleGame(variant="score", seed=3)

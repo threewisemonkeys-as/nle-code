@@ -61,9 +61,8 @@ def test_ordinary_play_is_clean():
 
 
 def test_recalling_the_game_is_recorded_and_not_punished():
-    """The brief names it, so this is not even a secret — but it is the line between
-    a session reading the screen and a session reciting, and the blind condition
-    needs it."""
+    """The measurement the blind condition exists for: when, and from what, the
+    session worked out what it is playing."""
     audit = grade(wrote("notes.md", "Elbereth engraved in the dust should scare it"))
     assert audit.clean, audit.findings
     assert "elbereth" in audit.named_the_game.lower()
@@ -138,7 +137,7 @@ def test_a_session_writing_its_own_paths_is_clean():
     saved a helper script, would otherwise read as dirty for doing what it was told.
     """
     repo = "/home/x/bai/cc_nle/nle-code"
-    root = "/home/x/nle-runs/20260909-160328"
+    root = "/home/x/agent-runs/20260909-160328"
     stream = ran(
         "cat act",  # -> exec "<repo>/.env-venv/bin/python" "<repo>/act.py"
         f'exec "{repo}/.env-venv/bin/python" "{repo}/act.py" "$@"',
@@ -152,8 +151,8 @@ def test_a_session_writing_its_own_paths_is_clean():
 
 
 def test_another_launch_is_still_reaching():
-    root = "/home/x/nle-runs/20260909-160328"
-    other = grade(ran("cat /home/x/nle-runs/20260101-000000/.rig/summary.json"),
+    root = "/home/x/agent-runs/20260909-160328"
+    other = grade(ran("cat /home/x/agent-runs/20260101-000000/.rig/summary.json"),
                   own="SUAUK", root=root)
     assert not other.clean and "the record" in other.findings
     mine = grade(ran(f"cat {root}/.rig/labels.json"), own="SUAUK", root=root)

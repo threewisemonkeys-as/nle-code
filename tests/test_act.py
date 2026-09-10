@@ -37,7 +37,8 @@ QUIT = ["#quit", "y"]
 def rig(tmp_path):
     """A workspace and, somewhere else entirely, the environment's directory."""
 
-    def build(variant="nethack", budget=0, obs=("tty",), seed=3, fresh_world=False):
+    def build(variant="nethack", budget=0, obs=("tty",), seed=3, fresh_world=False,
+              blind=True):
         ws = tmp_path / "ws"
         ws.mkdir(exist_ok=True)
         env_dir = tmp_path / "env"
@@ -47,6 +48,7 @@ def rig(tmp_path):
             seed=seed,
             obs=list(obs),
             fresh_world=fresh_world,
+            blind=blind,
             budget=budget or act.DEFAULT_BUDGET[variant],
             env_dir=str(env_dir),
         )
@@ -184,17 +186,36 @@ def test_the_curve_across_lives_is_kept(rig):
 # --------------------------------------------------------------------------- #
 
 
-def test_state_json_carries_no_league_table(rig):
+def test_state_json_carries_no_league_table_and_does_not_name_the_game(rig):
+    """`variant` is the string "nethack", in a file that sits beside the log the
+    session is told to read. Withholding the name from the brief and from the screen
+    and leaving it here would be withholding nothing (F18)."""
     session, ws, _ = rig(budget=40)
     run(session, ["l", "l", *QUIT])
     saved = json.loads((ws / act.STATE).read_text())
     for leak in ("episodes", "score", "max_depth", "max_xplevel", "deaths",
-                 "quits", "unique_cells", "turns", "env_dir"):
+                 "quits", "unique_cells", "turns", "env_dir", "variant", "blind"):
         assert leak not in saved, f"state.json carries {leak}"
+    assert "nethack" not in (ws / act.STATE).read_text().lower()
     # The life's own return stays, because `status` shows it and the status line
     # shows the score anyway. The run total goes, because it is the number a session
     # would grow instead of playing.
     assert "life_reward" in saved and "reward" not in saved
+
+
+def test_nothing_in_the_workspace_names_the_game(rig):
+    """The whole point of the blind condition, checked over the workspace rather
+    than over any one file that was supposed to hold the line."""
+    session, ws, _ = rig(budget=40)
+    run(session, ["l", "v", "cr", "l"])  # `v` is the version line, which names it
+    for path in ws.rglob("*"):
+        if path.is_file():
+            assert "nethack" not in path.read_text(errors="replace").lower(), path
+
+
+def test_a_named_run_lets_the_game_name_itself(rig):
+    session, ws, _ = rig(budget=40, blind=False)
+    assert "NetHack" in (ws / "screens" / "000000.txt").read_text()
 
 
 def test_the_log_says_nothing_about_the_observation(rig):
@@ -449,9 +470,10 @@ def test_a_rebuilt_run_keeps_what_it_has_already_written(tmp_path):
 
 
 def test_a_rebuilt_run_takes_its_game_from_the_record_not_the_arguments(tmp_path):
-    """Variant, seed, channels and fresh_world define the game the history is a
-    history of. A launcher that disagreed about any of them would rebuild a
-    different game and call it the same run."""
+    """Variant, seed, channels, fresh_world and blindness define the game the history
+    is a history of. A launcher that disagreed about any of them would rebuild a
+    different game and call it the same run — and the record beside the environment
+    is where they live, because two of the five are what the workspace withholds."""
     ws, env_dir = tmp_path / "ws", tmp_path / "env"
     ws.mkdir()
     try:
@@ -459,10 +481,31 @@ def test_a_rebuilt_run_takes_its_game_from_the_record_not_the_arguments(tmp_path
                 "--budget", "20")
         act_cli(ws, "do", ".")
         act_cli(ws, "init", "--variant", "score", "--seed", "7", "--obs", "symbolic",
-                "--env-dir", str(env_dir), "--budget", "20", "--resume")
+                "--named", "--env-dir", str(env_dir), "--budget", "20", "--resume")
         now = json.loads((env_dir / act.RESULT).read_text())
         assert now["variant"] == "nethack" and now["seed"] == 3
-        assert now["obs"] == ["tty"]
+        assert now["obs"] == ["tty"] and now["blind"] is True
+        assert "NetHack" not in (ws / "screens" / "000001-resume.txt").read_text()
+    finally:
+        subprocess.run([sys.executable, str(ROOT / "act.py"), "stop"], cwd=ws, timeout=60)
+
+
+def test_resuming_without_the_record_is_refused(tmp_path):
+    """The record beside the environment is what says which game this is a run of,
+    now that `state.json` does not."""
+    ws, env_dir = tmp_path / "ws", tmp_path / "env"
+    ws.mkdir()
+    try:
+        act_cli(ws, "init", "--seed", "3", "--env-dir", str(env_dir), "--budget", "20")
+        act_cli(ws, "do", ".")
+        act_cli(ws, "stop")
+        lost = subprocess.run(
+            [sys.executable, str(ROOT / "act.py"), "init", "--resume",
+             "--env-dir", str(tmp_path / "elsewhere"), "--budget", "20"],
+            cwd=ws, capture_output=True, text=True, timeout=300,
+        )
+        said = lost.stdout + lost.stderr
+        assert lost.returncode != 0 and "needs the --env-dir" in said
     finally:
         subprocess.run([sys.executable, str(ROOT / "act.py"), "stop"], cwd=ws, timeout=60)
 

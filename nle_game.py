@@ -32,6 +32,16 @@ this run sets to zero (F3). The score is already on the status line — NetHack 
 What the harness keeps to itself is the aggregate across lives, for the reason
 `cc_craftax` learned the hard way: a session shown a total will optimise the total.
 
+**The blind condition.** A run may be played by a session that has not been told
+what the game is, and that is the harness's default (run.py's OPENING). The game does
+not cooperate: it writes its own name on the opening screen — `Hello Agent, welcome
+to NetHack!` — and again on `v` and `#version`. So the blind condition redacts that
+one word from the text channels, and nothing else (F18). It is the single place this
+harness modifies what the package produces, it changes no dynamics, and it is a delay
+rather than a fence: a 38-year-old game is recognisable from a status line, and the
+audit's `named_the_game` measures when the session works it out rather than pretending
+it cannot.
+
 **The observation channels.** NLE renders the terminal (`tty_chars`, `tty_colors`),
 a symbolic view (`glyphs`, `chars`, `blstats`, the inventory) and — since 1.0 — a
 tile-drawn frame from NetHack's own tileset (F9). Which of them a run gives out is
@@ -63,6 +73,13 @@ from typing import Any
 VARIANTS = ("nethack", "score")
 CHANNELS = ("tty", "ansi", "pixels", "symbolic")
 DEFAULT_CHANNELS = ("tty",)
+
+# What the game calls itself, and what a blind run sees instead (F18). The
+# replacement is the same length so that nothing on an 80-column screen moves, and it
+# is a row of stars rather than an invented name: a session that finds it should be
+# able to tell that something was withheld, not be told something false.
+NAME = re.compile(rb"nethack", re.I)
+REDACTED = b"*" * 7
 
 # The screen NetHack draws, and the shape every channel is derived from.
 ROWS, COLS = 24, 80
@@ -189,6 +206,7 @@ class NleGame:
         seed: int = 0,
         obs: tuple[str, ...] = DEFAULT_CHANNELS,
         fresh_world: bool = False,
+        blind: bool = True,
         savedir: str | None = None,
     ) -> None:
         if variant not in VARIANTS:
@@ -212,6 +230,7 @@ class NleGame:
         self.seed = seed
         self.channels = channels
         self.fresh_world = fresh_world
+        self.blind = blind
         self.spec = _spec(variant)
 
         kwargs = dict(self.spec.kwargs)
@@ -374,11 +393,21 @@ class NleGame:
 
     # -- what the agent is given --------------------------------------------- #
 
+    def _rows(self) -> list[bytes]:
+        """The terminal as 24 rows of 80 bytes, redacted if this run is blind.
+
+        One place, because every text channel is drawn from it: a redaction that
+        reached `screen()` and not `ansi()` would hand the answer to whichever run
+        asked for colour.
+        """
+        rows = [bytes(row) for row in self._obs["tty_chars"]]
+        if not self.blind:
+            return rows
+        return [NAME.sub(REDACTED, row) for row in rows]
+
     def screen(self) -> str:
         """The terminal as NetHack drew it: 24 lines of 80 columns."""
-        return "\n".join(
-            "".join(chr(c) for c in row).rstrip() for row in self._obs["tty_chars"]
-        )
+        return "\n".join(row.decode("latin-1").rstrip() for row in self._rows())
 
     def ansi(self) -> str:
         """The same screen with the colours the terminal would have shown.
@@ -388,7 +417,7 @@ class NleGame:
         out less than the game draws.
         """
         out = []
-        for chars, colors in zip(self._obs["tty_chars"], self._obs["tty_colors"], strict=True):
+        for chars, colors in zip(self._rows(), self._obs["tty_colors"], strict=True):
             line, last = [], None
             for char, color in zip(chars, colors, strict=True):
                 color = int(color)
@@ -422,12 +451,21 @@ class NleGame:
         """The arrays NLE hands a network: the glyph grid, the stats, the inventory."""
         import numpy as np  # noqa: PLC0415
 
-        return {
-            key: np.asarray(self._obs[key])
+        arrays = {
+            key: np.asarray(self._obs[key]).copy()
             for key in ("glyphs", "chars", "colors", "specials", "blstats",
                         "message", "inv_glyphs", "inv_strs", "inv_letters",
                         "inv_oclasses", "tty_cursor")
         }
+        if self.blind:
+            # `message` is the same line the screen carries, in bytes (F18).
+            said = bytes(arrays["message"]).split(b"\x00")[0]
+            if NAME.search(said):
+                fixed = NAME.sub(REDACTED, said)
+                arrays["message"] = np.frombuffer(
+                    fixed.ljust(len(arrays["message"]), b"\x00"), dtype=np.uint8
+                ).copy()
+        return arrays
 
     def observe(self, into: Path, index: int, tag: str = "") -> dict[str, str]:
         """Write every enabled channel, and say where each one went.

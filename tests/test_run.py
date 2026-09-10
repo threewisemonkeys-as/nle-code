@@ -19,15 +19,50 @@ from nle_game import VARIANTS  # noqa: E402
 
 
 def test_a_workspace_holds_the_prompt_and_two_shims(tmp_path):
-    ws = run.make_workspace(tmp_path, "B4XPT", ["tty"], "named")
+    ws = run.make_workspace(tmp_path, "B4XPT", ["tty"], "blind")
     assert sorted(p.name for p in ws.iterdir()) == ["CLAUDE.md", "act", "python"]
     brief = (ws / "CLAUDE.md").read_text()
-    assert brief.startswith("You are playing NetHack")
+    assert brief.startswith("You are playing a game you have never seen before.")
     assert "notes.md" in brief, "the playing doctrine did not travel"
 
 
+def test_the_shims_do_not_name_what_is_being_played(tmp_path):
+    """The first thing a curious session does with a command it has been handed is
+    read it. Written directly, `act` names the harness — and the harness is named
+    after the game (F18)."""
+    ws = run.make_workspace(tmp_path, "B4XPT", ["tty"], "blind")
+    for name in ("act", "python"):
+        said = (ws / name).read_text()
+        assert "nle" not in said.lower(), f"{name} says {said!r}"
+        assert str(tmp_path / run.BIN) in said
+    # And they still work.
+    out = subprocess.run([str(ws / "python"), "-c", "import numpy; print('ok')"],
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0 and "ok" in out.stdout, out.stderr
+
+
+def test_the_default_brief_withholds_the_game(tmp_path):
+    """Every sibling harness withholds it, and here it takes more than keeping quiet
+    (F18): the game names itself on the opening screen, so `--opening blind` has to
+    reach the actuator too."""
+    assert run.OPENING and "blind" in run.OPENING
+    parsed = run.build_parser().parse_args([]) if hasattr(run, "build_parser") else None
+    ws = run.make_workspace(tmp_path, "B4XPT", ["tty"], "blind")
+    assert "NetHack" not in (ws / "CLAUDE.md").read_text()
+    assert parsed is None or parsed.opening == "blind"
+
+
+def test_naming_the_game_reaches_the_actuator_and_not_only_the_brief(tmp_path):
+    """A session told nothing, whose first screen says `welcome to NetHack!`, has
+    been told. The two have to agree."""
+    import inspect
+
+    said = inspect.getsource(run.play)
+    assert '--named' in said and 'args.opening == "named"' in said
+
+
 def test_the_two_openings_differ_in_one_paragraph_and_nothing_else(tmp_path):
-    """`blind` is an ablation, so it has to be the same run with one sentence
+    """`named` is the ablation, so it has to be the same run with one sentence
     changed — not a second brief that drifted."""
     named = (run.make_workspace(tmp_path / "a", "B4XPT", ["tty"], "named") / "CLAUDE.md").read_text()
     blind = (run.make_workspace(tmp_path / "b", "K7M3Q", ["tty"], "blind") / "CLAUDE.md").read_text()
@@ -82,7 +117,7 @@ def test_the_brief_says_what_the_run_is_judged_on(tmp_path):
 
 def test_the_agents_interpreter_reads_observations_and_not_the_package(tmp_path):
     """The run is unplayable without numpy and Pillow, and compromised with nle."""
-    ws = run.make_workspace(tmp_path, "B4XPT", ["tty"], "named")
+    ws = run.make_workspace(tmp_path, "B4XPT", ["tty"], "blind")
     ok = subprocess.run([str(ws / "python"), "-c", "import numpy, PIL; print('ok')"],
                         capture_output=True, text=True, timeout=120)
     assert ok.returncode == 0 and "ok" in ok.stdout, ok.stderr

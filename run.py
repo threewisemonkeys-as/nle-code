@@ -55,7 +55,10 @@ from nle_game import CHANNELS, DEFAULT_CHANNELS, VARIANTS  # noqa: E402
 # Outside the repository on purpose. A workspace under it puts this harness's source,
 # its git history, the interpreter that can import the package and every sibling
 # session one `..` away.
-RUNS = Path(os.environ.get("NLE_RUNS") or Path.home() / "nle-runs")
+# The launch root, and its name is part of the fence: a workspace is the session's
+# working directory, so `pwd` puts every component of this path in front of it. The
+# siblings called theirs after the game (`craftax-runs`); this one must not (F18).
+RUNS = Path(os.environ.get("NLE_RUNS") or Path.home() / "agent-runs")
 # The interpreter the workspace's `python` shim points at: numpy and Pillow, and
 # deliberately not the package — `from nle import nethack` reaches the glyph table
 # and a second copy of the game. Built by tools/make_agent_venv.sh.
@@ -119,7 +122,7 @@ class Report(BaseModel):
     # Whether the brief named the game. Recorded on every report because it is the
     # axis a later condition will vary, and because a number from one is not
     # comparable with a number from the other.
-    opening: str = "named"
+    opening: str = "blind"
     workspace: str
     agent: str = "claude"
     model: str = ""
@@ -198,33 +201,36 @@ def child_env(api_key: str | None) -> dict[str, str]:
     return env
 
 
-# What the brief says the game is. Two conditions, and the default is `named`.
+# What the brief says the game is. Two conditions, and the default is `blind`, as
+# it is in every sibling harness.
 #
-# Craftax and the humanRL games were withheld because a session that recognised one
-# had been handed the answer. NetHack cannot be withheld: the status line says
-# `Dlvl` and `HP` and `AC`, and one screen identifies it beyond doubt. Refusing to
-# name it would buy one action of ignorance and cost the comparison its meaning —
-# the Challenge's own leaderboard is bots written *by* people who knew the game,
-# and AutoAscend is made of nothing else. So the brief names it, and what the run
-# measures is whether recall converts into play through a keystroke interface.
+# Blind is harder to hold here than it was for Craftax, and it takes more than a
+# brief that keeps quiet: the game writes its own name on the opening screen, the
+# launch root and the workspace shims would otherwise carry it, and `state.json`
+# used to publish the variant. All four are closed (F18) — and none of that makes
+# NetHack unrecognisable, because a status line reading `Dlvl:1 HP:12(12) AC:9` is
+# unmistakable to a model that has read about it. What blind buys is that
+# recognition has to come from *the screen*, which is what `named_the_game`
+# measures, and a session that never looks at what it is playing cannot coast on
+# the name.
 #
-# `blind` is kept because it is a real ablation and this harness family already
-# knows how to run it, not because it is the honest condition here.
+# `named` is the ablation: the same run with the game announced in the brief. The
+# pair says how much of the score is recall and how much is reading.
 OPENING = {
-    "named": (
-        "You are playing NetHack, through a terminal, as a program rather than a\n"
-        "person. Nothing here tells you how to play it: what you know about this\n"
-        "game is yours, and what is in front of you is the authority."
-    ),
     "blind": (
         "You are playing a game you have never seen before.\n\n"
         "Something in it is you. The rest of it is for you to work out — nothing\n"
         "here names anything you will see, and nothing describes what any key does."
     ),
+    "named": (
+        "You are playing NetHack, through a terminal, as a program rather than a\n"
+        "person. Nothing here tells you how to play it: what you know about this\n"
+        "game is yours, and what is in front of you is the authority."
+    ),
 }
 
 
-def brief(channels: list[str], opening: str = "named") -> str:
+def brief(channels: list[str], opening: str = "blind") -> str:
     """GAME.md with its two generated paragraphs filled in.
 
     Generated rather than written, so a run with a different `--obs` cannot end up
@@ -248,6 +254,47 @@ def brief(channels: list[str], opening: str = "named") -> str:
     )
 
 
+# Where the launch keeps neutral names for the three paths a workspace shim has to
+# spell out. Not `.rig/`, which is the launch's record and which the audit treats as
+# out of bounds — a session that printed its own `act` would then be a finding.
+BIN = ".bin"
+
+
+def bin_dir(root: Path) -> Path:
+    """Neutral names for the interpreters and the actuator (F18).
+
+    A shim is a file in the workspace, and the first thing a curious session does
+    with a command it has been handed is read it. Written directly, `act` says
+    `exec "<...>/cc_nle/nle-code/.env-venv/bin/python" "<...>/cc_nle/nle-code/act.py"`,
+    which names the game twice before the session has played anything. Through
+    these symlinks it says `<launch>/.bin/env-python <launch>/.bin/actuator.py`.
+
+    A fence one step deep, not a wall. Reading *these* — `cat ../.bin/python`, or
+    `ls -l` on the directory — gets you the harness's path, and a session that reads
+    the actuator's source finds a docstring naming the game in its first line. Both
+    are *reaching* rather than noticing, and the audit grades them. What this closes
+    is the accident: the session that learns what it is playing from a path it
+    printed for some other reason.
+
+    The interpreters are wrappers rather than symlinks, and that is not a style
+    choice. A venv's `python` finds its own site-packages from the directory it was
+    invoked through, so a symlink to one lands outside the venv and imports nothing
+    — measured: `import numpy` fails through the link and succeeds through the
+    wrapper. The actuator is a symlink, because Python resolves a script's symlink
+    before deciding what is on `sys.path`.
+    """
+    where = root / BIN
+    where.mkdir(parents=True, exist_ok=True)
+    for name, target in (("env-python", Path(sys.executable)), ("python", AGENT_PYTHON)):
+        (where / name).write_text(f'#!/bin/sh\nexec "{target}" "$@"\n')
+        (where / name).chmod(0o755)
+    link = where / "actuator.py"
+    if not (link.is_symlink() and link.resolve() == (REPO / "act.py").resolve()):
+        link.unlink(missing_ok=True)
+        link.symlink_to(REPO / "act.py")
+    return where
+
+
 def make_workspace(root: Path, label: str, channels: list[str], opening: str) -> Path:
     """A workspace holds the prompt, a way to act, a way to look, and nothing else.
 
@@ -256,24 +303,27 @@ def make_workspace(root: Path, label: str, channels: list[str], opening: str) ->
 
     Two shims. `act` runs the actuator under this project's interpreter directly
     rather than through `uv run`, because the agent invokes it hundreds of times.
-    `python` is not a convenience: the observation is a PNG, and the system
-    interpreter on this machine has neither numpy nor Pillow, so without it the run
-    is unplayable. It points at an interpreter that cannot import the package —
+    `python` is not a convenience: the observation is a screen of text and, when the
+    run gives it out, a PNG, and the system interpreter on this machine has neither
+    numpy nor Pillow. It points at an interpreter that cannot import the package —
     handing over the harness's own would hand over a second copy of the game.
+
+    Both go through `bin_dir`, so that neither names what is being played.
     """
     if not AGENT_PYTHON.exists():
         raise SystemExit(
             f"run: no agent interpreter at {AGENT_PYTHON} — the observations cannot "
             "be opened without one. Build it with tools/make_agent_venv.sh"
         )
+    neutral = bin_dir(root)
     ws = root / label
     ws.mkdir(parents=True)
     (ws / "CLAUDE.md").write_text(
         brief(channels, opening) + "\n" + (REPO / "PROMPT.md").read_text()
     )
     for name, interpreter, script in (
-        ("act", sys.executable, f' "{REPO / "act.py"}"'),
-        ("python", AGENT_PYTHON, ""),
+        ("act", neutral / "env-python", f' "{neutral / "actuator.py"}"'),
+        ("python", neutral / "python", ""),
     ):
         shim = ws / name
         shim.write_text(f'#!/bin/sh\nexec "{interpreter}"{script} "$@"\n')
@@ -360,9 +410,13 @@ def session_config(root: Path, label: str) -> Path:
 
 
 async def act(ws: Path, *args: str) -> str:
+    """Run one actuator command in a workspace, as the launcher rather than as the
+    session. Through the launch's neutral name, so that a `ps` from inside the
+    workspace does not carry the harness's path (F18)."""
+    neutral = bin_dir(ws.parent)
     proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(REPO / "act.py"),
+        str(neutral / "env-python"),
+        str(neutral / "actuator.py"),
         *args,
         cwd=ws,
         stdout=asyncio.subprocess.PIPE,
@@ -545,6 +599,11 @@ async def play(
             ]
             if args.fresh_world:
                 out.append("--fresh-world")
+            if args.opening == "named":
+                # The brief and the observations agree about this or neither is
+                # worth anything: a session told nothing, whose first screen says
+                # `welcome to NetHack!`, has been told.
+                out.append("--named")
             # Only the first session of a launch decides how the game begins. Every
             # session after it resumes, whatever the first one did — including a
             # fresh run, whose second session picks up the state its first left.
@@ -849,9 +908,9 @@ async def main() -> int:
                              "chain gives up")
     parser.add_argument("--obs", nargs="+", choices=CHANNELS, default=list(DEFAULT_CHANNELS),
                         help="which of the package's own observations the sessions get")
-    parser.add_argument("--opening", choices=sorted(OPENING), default="named",
-                        help="whether the brief names the game (default) or withholds "
-                             "it, which is an ablation and not the honest condition")
+    parser.add_argument("--opening", choices=sorted(OPENING), default="blind",
+                        help="whether the brief withholds the game (default) or "
+                             "names it, which is the ablation")
     parser.add_argument("--fresh-world", action="store_true",
                         help="roll a new character and dungeon on each life instead "
                              "of dealing this one again")
