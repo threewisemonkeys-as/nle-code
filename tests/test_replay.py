@@ -121,6 +121,48 @@ def test_keys_thrown_into_a_prompt_are_marked(launch):
     assert any(step["wasted"] for step in built["steps"])
 
 
+def test_the_pages_own_javascript_runs(launch, tmp_path):
+    """The fold above is the Python twin of what the browser does; this is the
+    browser's own code, against a stub DOM. Without it the data could be perfect and
+    the page still blank — which is the way a viewer usually breaks."""
+    import shutil
+    import subprocess
+
+    js = shutil.which("bun") or shutil.which("node")
+    if not js:
+        pytest.skip("no javascript runtime on this box")
+    root, ws, env_dir = launch([(["l", "l", "j"], "east then south")])
+    out = tmp_path / "replay.html"
+    sys.argv = ["replay", str(root), "--out", str(out)]
+    assert replay.main() == 0
+
+    check = tmp_path / "check.js"
+    check.write_text(r"""
+const fs = require('fs');
+const page = fs.readFileSync(process.argv[2], 'utf8');
+const js = page.slice(page.indexOf('<script>') + 8, page.lastIndexOf('</script>'));
+const els = {};
+const stub = () => ({textContent:'', innerHTML:'', style:{}, value:0, max:0,
+                     classList:{toggle(){}, add(){}, remove(){}}, dataset:{}});
+globalThis.document = {
+  getElementById: (id) => els[id] || (els[id] = stub()),
+  querySelectorAll: () => [], onkeydown: null,
+};
+globalThis.setInterval = () => 0;
+globalThis.clearInterval = () => {};
+new Function(js)();
+const rows = els.screen.innerHTML.replace(/<[^>]+>/g, '').split('\n');
+if (rows.length !== 25) throw new Error('drew ' + rows.length + ' rows');
+if (!/Dlvl:1/.test(rows.join('\n'))) throw new Error('no status line');
+if (!/AAAAA/.test(els['run-title'].textContent)) throw new Error('no run picked');
+console.log('ok');
+""")
+    ran = subprocess.run([js, str(check), str(out)], capture_output=True, text=True,
+                         timeout=120)
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    assert "ok" in ran.stdout
+
+
 def test_the_page_is_one_self_contained_file(launch, tmp_path):
     root, ws, env_dir = launch([(["l", "l"], "east")])
     out = tmp_path / "replay.html"
