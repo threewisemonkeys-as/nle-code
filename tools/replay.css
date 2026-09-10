@@ -1,0 +1,165 @@
+/* ── tokens ─────────────────────────────────────────────────────────────────
+   Light is the bare :root. Dark is redefined twice — once for the un-stamped
+   document under prefers-color-scheme, once for an explicit toggle — so all
+   three viewer states resolve. No component colour is declared anywhere but
+   here.                                                                     */
+:root {
+  color-scheme: light;
+  --bg:        #f7f8f9;
+  --panel:     #ffffff;
+  --sunk:      #eef1f4;
+  --line:      #dfe4e9;
+  --line-soft: #ecf0f3;
+  --ink:       #0f1317;
+  --ink-2:     #4c5866;
+  --ink-3:     #78838f;
+
+  --act:       #2a78d6;   /* playing the game            */
+  --off:       #eb6834;   /* work off the board          */
+  --act-soft:  #2a78d61f;
+  --off-soft:  #eb68341f;
+
+  /* The terminal. A screen of NetHack is drawn in the sixteen curses colours,
+     and the page has to be able to show all of them on both grounds — so the
+     dark set below is not the same hexes lightened, it is the set that stays
+     legible on ink. */
+  --term-bg:   #12161b;
+  --term-fg:   #d7dde3;
+  --c0: #2b3138; --c1: #d9483f; --c2: #4a9c53; --c3: #b6893a;
+  --c4: #3f7fd0; --c5: #a05fc0; --c6: #3f9fa8; --c7: #b9c2cb;
+  --c8: #5d6771; --c9: #ff6a5c; --ca: #63c46e; --cb: #e0b352;
+  --cc: #61a5f5; --cd: #c583e6; --ce: #56c8d2; --cf: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg:        #0d1014;
+    --panel:     #151a20;
+    --sunk:      #1b222a;
+    --line:      #262f39;
+    --line-soft: #1f272f;
+    --ink:       #e6ebf0;
+    --ink-2:     #a4b0bc;
+    --ink-3:     #74818e;
+    --act:       #5ea0ec;
+    --off:       #ff8a5c;
+    --act-soft:  #5ea0ec26;
+    --off-soft:  #ff8a5c26;
+    --term-bg:   #0a0d11;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:        #0d1014;
+  --panel:     #151a20;
+  --sunk:      #1b222a;
+  --line:      #262f39;
+  --line-soft: #1f272f;
+  --ink:       #e6ebf0;
+  --ink-2:     #a4b0bc;
+  --ink-3:     #74818e;
+  --act:       #5ea0ec;
+  --off:       #ff8a5c;
+  --act-soft:  #5ea0ec26;
+  --off-soft:  #ff8a5c26;
+  --term-bg:   #0a0d11;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 14px/1.55 "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 34px 22px 90px; }
+
+h1 { font: 400 30px/1.2 "Instrument Serif", Georgia, serif; margin: 0 0 6px; }
+h2 { font: 600 13px/1.3 "IBM Plex Sans", sans-serif; margin: 0;
+     letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+p  { margin: 0 0 10px; color: var(--ink-2); max-width: 68ch; }
+.mast { margin-bottom: 22px; }
+.hint { color: var(--ink-3); font-size: 12px; }
+
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  margin-bottom: 16px; overflow: hidden;
+}
+.card > header {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 11px 14px; border-bottom: 1px solid var(--line-soft);
+}
+.card > .body { padding: 14px; }
+
+/* ── the picker ─────────────────────────────────────────────────────────── */
+table.matrix { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.matrix th {
+  text-align: right; font-weight: 600; color: var(--ink-3);
+  font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+  padding: 6px 9px; border-bottom: 1px solid var(--line);
+}
+table.matrix th:first-child, table.matrix td:first-child { text-align: left; }
+table.matrix td { padding: 7px 9px; border-bottom: 1px solid var(--line-soft);
+                  text-align: right; font-variant-numeric: tabular-nums; }
+table.matrix tr { cursor: pointer; }
+table.matrix tr:hover td { background: var(--sunk); }
+table.matrix tr.on td { background: var(--act-soft); }
+table.matrix tr.on td:first-child { box-shadow: inset 3px 0 0 var(--act); }
+
+/* ── the terminal ───────────────────────────────────────────────────────── */
+.screen {
+  background: var(--term-bg); color: var(--term-fg);
+  padding: 14px 16px; border-radius: 8px; overflow-x: auto;
+}
+.screen pre {
+  margin: 0; font: 400 13px/1.28 "IBM Plex Mono", ui-monospace, monospace;
+  white-space: pre; letter-spacing: 0;
+}
+.f0{color:var(--c0)} .f1{color:var(--c1)} .f2{color:var(--c2)} .f3{color:var(--c3)}
+.f4{color:var(--c4)} .f5{color:var(--c5)} .f6{color:var(--c6)} .f7{color:var(--c7)}
+.f8{color:var(--c8)} .f9{color:var(--c9)} .fa{color:var(--ca)} .fb{color:var(--cb)}
+.fc{color:var(--cc)} .fd{color:var(--cd)} .fe{color:var(--ce)} .ff{color:var(--cf)}
+
+/* ── the transport ──────────────────────────────────────────────────────── */
+.transport { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+             border-top: 1px solid var(--line-soft); }
+.transport button {
+  font: 600 12px "IBM Plex Sans", sans-serif; color: var(--ink);
+  background: var(--sunk); border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 11px; cursor: pointer;
+}
+.transport button:hover { border-color: var(--act); color: var(--act); }
+input[type=range] { flex: 1; accent-color: var(--act); }
+.at { font: 500 12px "IBM Plex Mono", monospace; color: var(--ink-2);
+      font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ── the strip of numbers ───────────────────────────────────────────────── */
+.strip { display: flex; flex-wrap: wrap; gap: 0; border-top: 1px solid var(--line-soft); }
+.stat { flex: 1 1 92px; padding: 9px 12px; border-right: 1px solid var(--line-soft); }
+.stat:last-child { border-right: 0; }
+.stat b { display: block; font: 600 16px/1.2 "IBM Plex Mono", monospace;
+          font-variant-numeric: tabular-nums; }
+.stat span { font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+             color: var(--ink-3); }
+.stat.hot b { color: var(--act); }
+
+/* ── what the session said and did ──────────────────────────────────────── */
+.plan { padding: 12px 14px; border-top: 1px solid var(--line-soft);
+        font-size: 13px; color: var(--ink); }
+.plan em { color: var(--ink-3); font-style: normal; }
+.work { max-height: 340px; overflow-y: auto; padding: 4px 14px 12px; }
+.work .run { margin: 10px 0 0; }
+.work .run > div:first-child {
+  font: 500 12px "IBM Plex Mono", monospace; color: var(--off);
+  background: var(--off-soft); padding: 5px 8px; border-radius: 5px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.work .out {
+  font: 400 11.5px/1.45 "IBM Plex Mono", monospace; color: var(--ink-3);
+  white-space: pre-wrap; word-break: break-word; padding: 5px 8px 0 8px;
+  max-height: 160px; overflow: hidden;
+}
+.keys { font: 500 12px "IBM Plex Mono", monospace; color: var(--act);
+        background: var(--act-soft); border-radius: 5px; padding: 2px 7px; }
+.mark { color: var(--off); font-weight: 600; }

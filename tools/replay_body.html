@@ -1,0 +1,173 @@
+<meta charset="utf-8">
+<title>NetHack, Played Blind</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Instrument+Serif&display=swap">
+
+<style>/*__CSS__*/</style>
+
+<div class="wrap">
+  <div class="mast">
+    <h1>NetHack, played blind</h1>
+    <p>A coding agent playing NetHack through the terminal, as it ships: an action is
+       one keystroke, menus and <code>--More--</code> are its own problem, and the brief
+       never says what the game is. Pick a run, then scrub it — beside each screen is
+       the plan that batch was given, the key it played, and the work the session did
+       in its workspace before playing it.</p>
+  </div>
+
+  <div class="card">
+    <header><h2>The runs</h2><span class="hint" id="picker-hint"></span></header>
+    <div class="body" style="padding:0"><table class="matrix" id="matrix"></table></div>
+  </div>
+
+  <div class="card">
+    <header>
+      <h2 id="run-title">—</h2>
+      <span class="hint" id="run-hint"></span>
+    </header>
+    <div class="body"><div class="screen"><pre id="screen"></pre></div></div>
+
+    <div class="transport">
+      <button id="back">◀</button>
+      <button id="play">▶ play</button>
+      <button id="fwd">▶</button>
+      <input type="range" id="slider" min="0" max="0" value="0">
+      <span class="at" id="at"></span>
+    </div>
+
+    <div class="strip" id="strip"></div>
+    <div class="plan" id="plan"></div>
+  </div>
+
+  <div class="card">
+    <header><h2>Off the board</h2><span class="hint">what the session ran between batches</span></header>
+    <div class="work" id="work"></div>
+  </div>
+</div>
+
+<script>
+const RUNS = /*__DATA__*/;
+
+const $ = (id) => document.getElementById(id);
+let run = null, at = 0, timer = null;
+
+/* A screen is stored as the rows that changed since the one before it, in two
+   parallel strings per row: the characters, and one hex digit of colour each.
+   Rebuilding is a fold, and the fold is cached, because a scrubber jumps. */
+function screensOf(r) {
+  if (r._cache) return r._cache;
+  const rows = [], colours = [];
+  let text = new Array(24).fill(" ".repeat(80));
+  let paint = new Array(24).fill("7".repeat(80));
+  for (const delta of r.screens) {
+    text = text.slice(); paint = paint.slice();
+    for (const [i, line, hue] of delta) { text[i] = line; paint[i] = hue; }
+    rows.push(text); colours.push(paint);
+  }
+  r._cache = [rows, colours];
+  return r._cache;
+}
+
+function paint() {
+  const [rows, colours] = screensOf(run);
+  const text = rows[at], hue = colours[at];
+  let html = "";
+  for (let i = 0; i < text.length; i++) {
+    const line = text[i], colour = hue[i];
+    let span = "", last = null;
+    for (let j = 0; j < line.length; j++) {
+      if (colour[j] !== last) {
+        if (last !== null) span += "</span>";
+        span += `<span class="f${colour[j]}">`;
+        last = colour[j];
+      }
+      span += line[j].replace("&", "&amp;").replace("<", "&lt;");
+    }
+    html += span + (last === null ? "" : "</span>") + "\n";
+  }
+  $("screen").innerHTML = html;
+
+  const step = run.steps[at];
+  $("at").textContent = `${at} / ${run.steps.length - 1}`;
+  $("slider").value = at;
+  $("strip").innerHTML = [
+    ["key", at ? step.key : "—", false],
+    ["reward", step.reward ? (step.reward > 0 ? "+" : "") + step.reward : "·", !!step.reward],
+    ["score", step.score, false],
+    ["turn", step.turns, false],
+    ["dlvl", step.depth, false],
+    ["xp", step.xplevel, false],
+    ["life", step.life + 1, false],
+  ].map(([name, value, hot]) =>
+    `<div class="stat${hot ? " hot" : ""}"><b>${value}</b><span>${name}</span></div>`
+  ).join("");
+
+  const said = run.plans[step.plan] || "";
+  const marks = [];
+  if (step.ended) marks.push(`life over: ${step.ended}`);
+  if (step.wasted) marks.push("this key was thrown into a prompt that could not take it");
+  $("plan").innerHTML =
+    (marks.length ? `<div class="mark">${marks.join(" · ")}</div>` : "") +
+    (said ? said : "<em>no plan was given with this batch</em>");
+
+  const work = run.work[step.plan];
+  $("work").innerHTML = !work || !work.length
+    ? "<p class='hint'>nothing ran between the last batch and this one.</p>"
+    : work.map(([command, out]) =>
+        `<div class="run"><div>${esc(command)}</div>` +
+        (out ? `<div class="out">${esc(out)}</div>` : "") + "</div>").join("");
+}
+
+const esc = (s) => (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+function pick(i) {
+  run = RUNS[i]; at = 0;
+  document.querySelectorAll("#matrix tr").forEach((tr, n) =>
+    tr.classList.toggle("on", n === i + 1));
+  $("slider").max = run.steps.length - 1;
+  $("run-title").textContent = `${run.label} — ${run.role || "?"}`;
+  $("run-hint").textContent =
+    `${run.blind ? "blind" : "named"} · seed ${run.seed} · ${run.steps.length - 1}` +
+    ` of ${run.budget} keys · best life ${run.best} · dlvl ${run.depth}`;
+  paint();
+}
+
+function build() {
+  const head = ["run", "character", "keys", "turns", "best life", "dlvl", "xp",
+                "lives", "wasted keys"];
+  const rows = [`<tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr>`];
+  RUNS.forEach((r, i) => rows.push(
+    `<tr data-i="${i}"><td>${r.label}</td><td>${esc(r.role)}</td>` +
+    `<td>${r.steps.length - 1}</td><td>${r.turns}</td><td>${r.best}</td>` +
+    `<td>${r.depth}</td><td>${r.xplevel}</td><td>${r.lives}</td>` +
+    `<td>${r.wasted}</td></tr>`));
+  $("matrix").innerHTML = rows.join("");
+  $("picker-hint").textContent = `${RUNS.length} run${RUNS.length === 1 ? "" : "s"}`;
+  document.querySelectorAll("#matrix tr[data-i]").forEach((tr) =>
+    tr.onclick = () => pick(+tr.dataset.i));
+  pick(0);
+}
+
+function step(by) {
+  at = Math.max(0, Math.min(run.steps.length - 1, at + by));
+  paint();
+}
+$("back").onclick = () => step(-1);
+$("fwd").onclick = () => step(1);
+$("slider").oninput = (e) => { at = +e.target.value; paint(); };
+$("play").onclick = () => {
+  if (timer) { clearInterval(timer); timer = null; $("play").textContent = "▶ play"; return; }
+  $("play").textContent = "❚❚ pause";
+  timer = setInterval(() => {
+    if (at >= run.steps.length - 1) { clearInterval(timer); timer = null;
+                                      $("play").textContent = "▶ play"; return; }
+    step(1);
+  }, 90);
+};
+document.onkeydown = (e) => {
+  if (e.key === "ArrowLeft") step(e.shiftKey ? -10 : -1);
+  if (e.key === "ArrowRight") step(e.shiftKey ? 10 : 1);
+};
+build();
+</script>
