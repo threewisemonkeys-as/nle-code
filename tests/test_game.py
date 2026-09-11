@@ -275,6 +275,69 @@ def test_blindness_changes_no_dynamics():
     assert seen[0] == seen[1]
 
 
+# -- recording ---------------------------------------------------------------- #
+
+
+def test_a_life_ending_while_recording_says_nothing_about_the_harness(tmp_path):
+    """The upstream bug that voided a 2,012-key pilot (F19).
+
+    NLE points NetHack's `record` and `logfile` at `<savedir>/nle.<pid>.*` and then
+    creates neither, so the end of every life printed `Cannot open file ... Is
+    NetHack installed correctly?` into the message area — a harness error handed to
+    the agent at the worst possible moment.
+    """
+    made = NleGame(seed=4, savedir=str(tmp_path / "rec"))
+    made.play("#quit")
+    made.play("y")
+    screen = made.screen()
+    made.close()
+    assert "Cannot open file" not in screen, screen.splitlines()[0]
+    assert "installed correctly" not in screen
+
+
+def test_a_run_with_a_death_replays_bit_exactly_while_recording(tmp_path):
+    """The serious half of F19: the error carried the **process id**, so the same
+    seed and the same keys stopped producing the same screens — and a resume is a
+    new process. `--stint` was handing the next session a game that was not the one
+    the record described.
+    """
+    keys = ["l", "l", "#quit", "y", "l", "j", "cr", "k"]
+
+    def rollout(where):
+        made = NleGame(seed=4, savedir=str(where))
+        screens = []
+        for key in keys:
+            _, alive = made.play(key)
+            screens.append(made.screen())
+            if not alive:
+                made.restart()
+        made.close()
+        return screens
+
+    assert rollout(tmp_path / "one") == rollout(tmp_path / "two")
+    # And against a run that is not recording at all, which is the same game.
+    plain = NleGame(seed=4)
+    quiet = []
+    for key in keys:
+        _, alive = plain.play(key)
+        quiet.append(plain.screen())
+        if not alive:
+            plain.restart()
+    plain.close()
+    assert rollout(tmp_path / "three") == quiet
+
+
+def test_the_recording_is_written(tmp_path):
+    """It is still worth having: NetHack's own record of the game (F16)."""
+    where = tmp_path / "rec"
+    made = NleGame(seed=4, savedir=str(where))
+    for _ in range(30):
+        made.play("l")
+    made.close()
+    assert list(where.glob("*.ttyrec3.bz2")), sorted(p.name for p in where.iterdir())
+    assert list(where.glob("*.xlogfile"))
+
+
 def test_the_score_task_is_a_different_game():
     """23 actions, and NLE steps past the menus itself."""
     made = NleGame(variant="score", seed=3)

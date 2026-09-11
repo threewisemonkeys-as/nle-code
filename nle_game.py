@@ -238,6 +238,7 @@ class NleGame:
             # NetHack's own recording of the game, in the format `ttyplay` reads,
             # plus the xlogfile it writes when a game ends (F16). Harness-side: it
             # goes beside the environment's log, never into the workspace.
+            _make_score_files(savedir)
             kwargs |= dict(savedir=savedir, save_ttyrec_every=1)
         self._env = tasks.NetHackScore(**kwargs)
         # The Challenge aborts a life that has not advanced the clock in 10,000
@@ -559,6 +560,36 @@ class NleGame:
         quoted in (F10, F11).
         """
         return 0
+
+
+def _make_score_files(savedir: str) -> None:
+    """Pre-create the score files NLE tells NetHack to write but does not create.
+
+    An upstream bug with real consequences (F19). When `savedir` is set, NLE points
+    NetHack's `record` and `logfile` at `<savedir>/nle.<pid>.record` and `.logfile`
+    — but its own "touch files, so lock_file() in files.c passes" loop creates
+    `perm`, `record` and `logfile` in the *temporary* var directory, and only
+    `xlogfile` at the prefix. So the two files NetHack writes **when a game ends**
+    do not exist, and the end of every life prints
+
+        Cannot open file <savedir>/nle.<pid>.logfile.  Is NetHack installed
+        correctly?
+
+    into the message area. Two things follow, and the second is the serious one.
+    The agent is handed a harness error to interpret at the worst moment it could
+    get one — and the message carries the **process id**, so the same seed and the
+    same keys stop producing the same screens (F7). A resumed run is a new process,
+    so it replays into a different game, and `--stint` silently hands the next
+    session a game that is not the one the record describes.
+
+    The prefix is computed exactly as `nle/env/base.py` computes it, from this
+    process's pid, which is the process that is about to construct the environment.
+    """
+    import os  # noqa: PLC0415
+
+    Path(savedir).mkdir(parents=True, exist_ok=True)
+    for name in ("record", "logfile", "perm"):
+        Path(savedir, f"nle.{os.getpid()}.{name}").touch()
 
 
 def _sgr(color: int) -> str:
