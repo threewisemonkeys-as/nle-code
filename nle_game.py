@@ -146,6 +146,14 @@ def _spec(variant: str) -> Spec:
         penalty_step=0.0,
         penalty_time=0.0,
         max_episode_steps=int(1e6),
+        # NetHack asks the operating system what day it is, and plays differently
+        # on a full moon, on Friday the 13th, at night and at midnight (F20). With
+        # this off — NLE's default — the same seeds and the same keys are *not* the
+        # same game: a replay on another day differs, and so does a resume after
+        # midnight, which is what `--stint` does on a long run. On, the four
+        # effects are derived from the seed instead, which is the only way a run
+        # can be a function of its record.
+        fix_moon_phase=True,
     )
     if variant == "nethack":
         # NetHackChallenge's own configuration, built on the parent class that will
@@ -286,7 +294,7 @@ class NleGame:
         self._obs, _ = self._env.reset()
         self._frozen = 0
         self._turn = self._stat("TIME")
-        episode = Episode(index=life, role=self._role())
+        episode = Episode(index=life, role=self._role(life))
         self.episodes.append(episode)
         self._note(episode)
 
@@ -360,17 +368,52 @@ class NleGame:
 
         return int(self._obs["blstats"][getattr(nethack, f"NLE_BL_{name}")])
 
-    def _role(self) -> str:
-        """The character this life was dealt, off the top line of the screen.
+    def _role(self, life: int) -> str:
+        """The character this life was dealt, in NetHack's own words.
 
         A seed rolls a role, a race, an alignment and a gender (F5), and which one
-        it rolled is most of what a life is worth in NetHack. It is read from the
-        welcome message rather than from a table because that is where NetHack
-        says it.
+        it rolled is most of what a life is worth — so the report carries it.
+
+        Usually it is the welcome message, which is the last thing on screen when a
+        game begins. Not always: on a full or new moon, or on Friday the 13th,
+        NetHack has something else to say and says it afterwards (F20), and the
+        welcome is gone before the first observation. Then it is read from a
+        *throwaway* game dealt from the same seeds, so that finding out what the
+        run is playing costs the run nothing.
         """
-        first = self.screen().splitlines()[0]
-        found = re.search(r"You are a[n]? (.+?)\.", first)
-        return found.group(1) if found else ""
+        found = re.search(r"You are an? (.+?)\.", self.screen())
+        return found.group(1) if found else self._role_from_attributes(life)
+
+    def _role_from_attributes(self, life: int) -> str:
+        """The role from `^x`, played in a copy of this game rather than in it.
+
+        The copy is dealt the same seeds, so it is the same character; it is stepped
+        once and thrown away. Twenty milliseconds, and the run's own budget and
+        history are untouched — an action spent here would be an action the agent
+        did not choose and the record could not explain.
+        """
+        from nle.env import tasks  # noqa: PLC0415
+
+        if "^x" not in self.spec.index:
+            # The score task's 23 actions do not include it, and a life there is
+            # worth a good deal less than a name.
+            return ""
+        core, disp = self._seeds(life)
+        twin = tasks.NetHackScore(**self.spec.kwargs)
+        try:
+            twin.seed(core, disp, False)
+            twin.reset()
+            obs, *_ = twin.step(self.spec.index["^x"])
+            said = "\n".join(
+                "".join(chr(c) for c in row).rstrip() for row in obs["tty_chars"]
+            )
+        finally:
+            twin.close()
+        who = re.search(r"You are an? \w+, a level \d+ (.+?)\.", said)
+        side = re.search(r"You are (lawful|neutral|chaotic),", said)
+        if not who:
+            return ""
+        return f"{side.group(1)} {who.group(1)}" if side else who.group(1)
 
     def _note(self, episode: Episode) -> None:
         """Read the score and the position off the status line.

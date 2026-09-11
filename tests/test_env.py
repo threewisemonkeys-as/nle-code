@@ -158,7 +158,10 @@ def test_the_seed_rolls_the_character_too():
         env.seed(seed, seed, False)
         obs, _ = env.reset()
         env.close()
-        return "".join(chr(c) for c in obs["tty_chars"][0])
+        # The whole screen, not its first line: with the clock out of the way the
+        # first line is a moon message for some seeds (F20), and two seeds can
+        # share one.
+        return bytes(obs["tty_chars"].reshape(-1))
 
     assert welcome(1) == welcome(1)
     assert welcome(1) != welcome(2)

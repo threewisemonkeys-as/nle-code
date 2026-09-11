@@ -214,7 +214,7 @@ def test_nothing_in_the_workspace_names_the_game(rig):
 
 
 def test_a_named_run_lets_the_game_name_itself(rig):
-    session, ws, _ = rig(budget=40, blind=False)
+    session, ws, _ = rig(budget=40, blind=False, seed=5)
     assert "NetHack" in (ws / "screens" / "000000.txt").read_text()
 
 

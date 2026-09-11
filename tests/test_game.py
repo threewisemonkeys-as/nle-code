@@ -225,7 +225,10 @@ def test_a_blind_run_is_not_told_by_the_game_what_the_game_is():
     nothing — so the blind condition redacts the word from every text channel. This
     is the only place the harness alters what the package produces.
     """
-    made = NleGame(seed=3, obs=("tty", "ansi", "symbolic"))
+    # Seed 5's opening is the welcome message. On a full moon, a new moon or a
+    # Friday the 13th NetHack has something else to say and the welcome is gone
+    # before the first observation (F20) — so the seed is part of this test.
+    made = NleGame(seed=5, obs=("tty", "ansi", "symbolic"))
     assert made.blind, "a run is blind unless it is told otherwise"
     assert "NetHack" not in made.screen()
     assert "*******" in made.screen()
@@ -237,7 +240,7 @@ def test_a_blind_run_is_not_told_by_the_game_what_the_game_is():
 
 
 def test_a_named_run_leaves_the_game_alone():
-    made = NleGame(seed=3, blind=False)
+    made = NleGame(seed=5, blind=False)
     assert "NetHack" in made.screen()
     made.close()
 
@@ -245,7 +248,7 @@ def test_a_named_run_leaves_the_game_alone():
 def test_the_redaction_moves_nothing_on_the_screen():
     """Same length, so an 80-column screen stays an 80-column screen: a map row that
     shifted by a character would be a different map."""
-    blind, named = NleGame(seed=3), NleGame(seed=3, blind=False)
+    blind, named = NleGame(seed=5), NleGame(seed=5, blind=False)
     for _ in range(40):
         blind.play("l")
         named.play("l")
@@ -336,6 +339,30 @@ def test_the_recording_is_written(tmp_path):
     made.close()
     assert list(where.glob("*.ttyrec3.bz2")), sorted(p.name for p in where.iterdir())
     assert list(where.glob("*.xlogfile"))
+
+
+# -- the clock ---------------------------------------------------------------- #
+
+
+def test_the_moon_comes_from_the_seed_and_not_from_the_calendar():
+    """F20, which voided two pilots before it was found.
+
+    NetHack asks the OS what day it is and plays differently on a full moon, on
+    Friday the 13th, at night and at midnight. With NLE's default that means the
+    same seeds and the same keys are not the same game on a different day — or
+    after midnight, which a long run crosses. These four seeds are NLE's own
+    mapping under `fix_moon_phase`; with the clock in charge they would all show
+    whatever tonight happens to be.
+    """
+    said = {}
+    for seed in (0, 3, 5, 49):
+        made = NleGame(seed=seed)
+        said[seed] = made.screen().splitlines()[0]
+        made.close()
+    assert "New moon" in said[0]
+    assert "Full moon" in said[3]
+    assert "Friday the 13th" in said[49]
+    assert "moon" not in said[5] and "Friday" not in said[5]
 
 
 def test_the_score_task_is_a_different_game():
