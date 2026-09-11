@@ -160,27 +160,33 @@ def agent(stream: Path) -> dict:
     """What the session cost and how hard it batched, from its own event stream."""
     if not stream.exists():
         return {}
-    turns = calls = compactions = 0
+    turns = calls = compactions = sessions = 0
     cost = 0.0
-    usage = {}
+    usage: dict[str, int] = {}
     for line in stream.read_text(errors="replace").splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
         kind = event.get("type")
-        if kind == "assistant":
+        if kind == "system" and event.get("subtype") == "init":
+            sessions += 1
+        elif kind == "assistant":
             turns += 1
             said = event.get("message", {}).get("content", [])
             calls += sum(1 for block in said if block.get("type") == "tool_use")
         elif kind == "system" and event.get("subtype") == "compact_boundary":
             compactions += 1
         elif kind == "result":
-            cost = event.get("total_cost_usd", cost)
-            usage = event.get("usage", {}) or usage
+            # One `result` per session, and a stinted run is several sessions in
+            # one stream: summed, or the run reports its last session's bill.
+            cost += event.get("total_cost_usd", 0.0)
+            for key in ("cache_read_input_tokens", "output_tokens"):
+                usage[key] = usage.get(key, 0) + (event.get("usage") or {}).get(key, 0)
     return {
         "turns": turns,
         "tool_calls": calls,
+        "sessions": sessions,
         "compactions": compactions,
         "cost_usd": round(cost, 2),
         "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
@@ -243,8 +249,8 @@ def show(one: dict) -> None:
     if said:
         per = round(face["keys"] / said["tool_calls"], 1) if said["tool_calls"] else 0
         print(f"  {said['turns']} turns, {said['tool_calls']} tool calls "
-              f"({per} keys each), {said['compactions']} compactions, "
-              f"${said['cost_usd']}")
+              f"({per} keys each) over {said['sessions']} session(s), "
+              f"{said['compactions']} compactions, ${said['cost_usd']}")
     if one["curve"]:
         print(f"  {'keys':>6}{'best life':>11}{'turns':>8}{'dlvl':>6}{'xp':>4}{'lives':>7}")
         for mark in one["curve"]:

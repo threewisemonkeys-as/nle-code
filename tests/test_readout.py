@@ -90,6 +90,26 @@ def test_keys_thrown_into_a_prompt_are_counted(played):
     assert face["at_a_prompt_pct"] > 0
 
 
+def test_the_readout_sums_cost_over_sessions_too(tmp_path):
+    """The same defect on the other side of the fence: `tools/readout.py` reads the
+    stream itself, and a chained run has one `result` per session."""
+    stream = tmp_path / "agent_stream.jsonl"
+    stream.write_text("\n".join(
+        json.dumps(event) for event in (
+            {"type": "system", "subtype": "init"},
+            {"type": "result", "total_cost_usd": 31.77,
+             "usage": {"cache_read_input_tokens": 100, "output_tokens": 10}},
+            {"type": "system", "subtype": "init"},
+            {"type": "result", "total_cost_usd": 12.10,
+             "usage": {"cache_read_input_tokens": 40, "output_tokens": 5}},
+        )
+    ))
+    said = readout.agent(stream)
+    assert said["cost_usd"] == pytest.approx(43.87)
+    assert said["sessions"] == 2
+    assert said["cache_read_tokens"] == 140 and said["output_tokens"] == 15
+
+
 def test_turns_are_summed_over_lives_and_not_carried_across(played):
     """The clock resets when a life does, so a run's turns are the sum over lives —
     and its best life is a maximum, never a total."""

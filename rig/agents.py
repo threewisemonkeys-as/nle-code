@@ -132,12 +132,17 @@ class Claude:
         elif kind == "system" and event.get("subtype") == "compact_boundary":
             report.compactions += 1
         elif kind == "result":
+            # Summed, not assigned. One session emits exactly one `result`, and a
+            # stinted run is several sessions appending to one stream — so taking
+            # the last one reports the final session's bill as the run's. The void
+            # 3000-key pilot printed $15.57 for three sessions whose first alone
+            # cost $31.77.
             usage = event.get("usage", {})
-            report.cost_usd = event.get("total_cost_usd", 0.0)
-            report.input_tokens = usage.get("input_tokens", 0)
-            report.output_tokens = usage.get("output_tokens", 0)
-            report.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
-            report.cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
+            report.cost_usd += event.get("total_cost_usd", 0.0)
+            report.input_tokens += usage.get("input_tokens", 0)
+            report.output_tokens += usage.get("output_tokens", 0)
+            report.cache_read_tokens += usage.get("cache_read_input_tokens", 0)
+            report.cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
 
     def ran(self, event: dict) -> list[str]:
         if event.get("type") != "assistant":
@@ -269,6 +274,11 @@ class Codex:
         elif kind == "item.completed" and item.get("type") == "command_execution":
             report.tool_calls += 1
         elif kind == "turn.completed":
+            # Codex reports usage cumulatively *within* a session and fires this
+            # every turn, so unlike Claude's `result` these are assignments. A
+            # chained Codex run would therefore report its last session's tokens as
+            # the run's; nothing here plays chained Codex, and fixing it needs a
+            # per-session key its stream does not obviously carry.
             usage = event.get("usage", {})
             report.input_tokens = usage.get("input_tokens", 0)
             # Reasoning tokens are billed as output and are most of the spend on

@@ -127,6 +127,29 @@ def test_the_agents_interpreter_reads_observations_and_not_the_package(tmp_path)
         assert blocked.returncode != 0, f"the agent's interpreter can import {module}"
 
 
+def test_a_chained_runs_cost_is_the_sum_of_its_sessions():
+    """One session emits one `result`; a stinted run is several sessions appending
+    to one stream. Taking the last one reported the final session's bill as the
+    run's — the void 3000-key pilot printed $15.57 for three sessions whose first
+    alone cost $31.77."""
+    import json as _json
+
+    report = run.Report(label="B4XPT", workspace="x")
+    agent = run.AGENTS["claude"]
+    for cost, tokens in ((31.77, 1000), (28.40, 900), (12.10, 700)):
+        run.absorb(agent, report, _json.dumps({
+            "type": "result",
+            "total_cost_usd": cost,
+            "usage": {"input_tokens": tokens, "output_tokens": 10,
+                      "cache_read_input_tokens": 5, "cache_creation_input_tokens": 2},
+        }))
+    assert report.cost_usd == pytest.approx(72.27)
+    assert report.input_tokens == 2600
+    assert report.output_tokens == 30
+    assert report.cache_read_tokens == 15
+    assert report.cache_creation_tokens == 6
+
+
 # --------------------------------------------------------------------------- #
 # Labels
 # --------------------------------------------------------------------------- #
