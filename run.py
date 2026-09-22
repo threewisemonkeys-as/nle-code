@@ -727,7 +727,8 @@ async def play(
         report = Report(label=label, variant=variant, seed=seed, obs=channels,
                         opening=args.opening, workspace=str(ws), agent=args.agent,
                         model=args.model, budget=budget,
-                        fenced=agent.FENCED and not args.no_fence)
+                        fenced=((agent.FENCED or getattr(args, "fence", False))
+                                and not getattr(args, "no_fence", False)))
 
         def briefed(n: int) -> str:
             """What session `n` is told it is walking into.
@@ -1103,7 +1104,13 @@ async def main() -> int:
                         help="roll a new character and dungeon on each life instead "
                              "of dealing this one again")
     parser.add_argument("--agent", default="claude", choices=sorted(AGENTS))
-    parser.add_argument(
+    fencing = parser.add_mutually_exclusive_group()
+    fencing.add_argument(
+        "--fence", action="store_true",
+        help="fence an agent that is not fenced by default — a new Claude run, whose "
+             "model has no record yet of staying out of the package",
+    )
+    fencing.add_argument(
         "--no-fence", action="store_true",
         help="run an agent that is normally fenced with the whole disk instead. "
              "For finding out what a session reaches for; not for a measured run",
@@ -1149,6 +1156,10 @@ async def main() -> int:
                   f"refresh token {(refresh - now) / 86400:.1f} days. Sessions "
                   f"refresh their own, so the refresh token is the one that has to "
                   f"outlast the run.", flush=True)
+    if args.agent == "claude" and args.fence:
+        print("run: --fence — these Claude sessions are fenced to their workspace, as "
+              "the Codex arm's are. The published Claude pass was not; the report's "
+              "`fenced` says which side of that this run is on.", flush=True)
     if args.agent == "codex":
         # This CLI has no per-request key to hand a session: it signs in once and
         # every session inherits a copy of that login. So there is one thing to check

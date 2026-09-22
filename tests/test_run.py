@@ -774,6 +774,61 @@ def test_no_fence_is_recorded_as_no_fence(tmp_path, monkeypatch):
     assert run.Report(label="W", workspace="/w").fenced is False
 
 
+def test_a_claude_run_can_be_fenced_and_says_so(tmp_path, monkeypatch):
+    """M6 and the published Craftax pass stay unfenced, and nothing here changes
+    that. But a *new* Claude model has no record of staying out of the package, and
+    `--fence` lets one be asked for. The CLI is wrapped, and the report says which
+    side of the asymmetry the run was on — an unfenced number and a fenced one are
+    not the same measurement."""
+    ws = tmp_path / "W"
+    ws.mkdir()
+    (ws / "state.json").write_text(json.dumps(
+        {"obs": ["tty"], "actions_used": 0, "terminal": False}))
+    seen: list[list[str]] = []
+
+    async def fake_act(where, *argv):
+        if argv[0] == "init":
+            state = json.loads((ws / "state.json").read_text())
+            state["actions_used"] += 10
+            (ws / "state.json").write_text(json.dumps(state))
+        return ""
+
+    async def fake_session(argv, where, env, report, agent):
+        seen.append(argv)
+        return "", 0
+
+    monkeypatch.setattr(run, "act", fake_act)
+    monkeypatch.setattr(run, "one_session", fake_session)
+    monkeypatch.setattr(run, "refresh_brief", lambda w, o: None)
+    monkeypatch.setattr(run, "session_config", lambda r, label, agent=None: tmp_path / "cfg")
+    monkeypatch.setattr(run, "audit_session", lambda *a, **k: run.Audit())
+    monkeypatch.setattr(run, "fenced_argv", lambda agent, argv, w, h: ["FENCE", *argv])
+    (tmp_path / ".envs" / "W").mkdir(parents=True)
+    (tmp_path / ".envs" / "W" / "result.json").write_text(json.dumps(
+        {f: 0 for f in ("actions_used", "best_episode", "episodes_completed",
+                        "mean_episode", "score", "lives", "deaths", "quits", "turns",
+                        "unique_cells", "max_depth", "max_xplevel")}
+        | {"episode_scores": [], "endings": [], "roles": []}))
+    args = type("A", (), {
+        "carry_on": str(tmp_path), "replay": None, "obs": ["tty"], "budget": 500,
+        "stint": 0, "max_sessions": 3, "fresh_world": False, "agent": "claude",
+        "model": "claude-opus-5-5", "dry_run": False, "retries": 2, "idle_wait": 0,
+        "opening": "named", "fence": True, "no_fence": False,
+    })()
+    report = asyncio.run(run.play("W", ("nethack", 0), tmp_path, args, {}, ["W"],
+                                  asyncio.Semaphore(1)))
+    assert report.fenced and seen and all(argv[0] == "FENCE" for argv in seen)
+    assert seen[0][1] == "claude", "the fence wrapped something other than the CLI"
+
+
+def test_fence_and_no_fence_cannot_both_be_asked_for():
+    """They mean opposite things, so asking for both is a mistake worth a failure
+    rather than a silent precedence rule."""
+    done = subprocess.run([sys.executable, str(ROOT / "run.py"), "--fence", "--no-fence",
+                           "--dry-run"], capture_output=True, text=True, timeout=120)
+    assert done.returncode != 0 and "not allowed with" in done.stderr
+
+
 # --------------------------------------------------------------------------- #
 # The fence
 # --------------------------------------------------------------------------- #
