@@ -64,6 +64,11 @@ RUNS = Path(os.environ.get("NLE_RUNS") or Path.home() / "agent-runs")
 # and a second copy of the game. Built by tools/make_agent_venv.sh.
 AGENT_PYTHON = REPO / ".agent-venv" / "bin" / "python"
 
+# The longest a chain will wait between sessions that played nothing. An hour is
+# the shape of the thing being waited out — an exhausted rate window — and waiting
+# longer than one before checking again buys nothing.
+MAX_IDLE_WAIT = 3600
+
 # No I, O, 0 or 1: a label is read off a directory listing and typed back by hand.
 LABEL_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 LABEL_LEN = 5
@@ -670,8 +675,17 @@ async def play(
                               f"did the {args.retries} before it — stopping the chain "
                               f"at {state['actions_used']}/{budget}", flush=True)
                         break
+                    # The retries were written for a failure that is over by the time
+                    # the next session starts. The one that actually ends a long run
+                    # is not: a rate limit is a window, and retrying inside it three
+                    # times in as many seconds spends the whole allowance of patience
+                    # in under a minute. So the wait doubles, and a chain that means
+                    # to play for a day can afford to sit out an hour of one.
+                    wait = min(args.idle_wait * 2 ** (idle - 1), MAX_IDLE_WAIT)
                     print(f"[{label}] session {n} played no actions — trying again "
-                          f"({idle} of {args.retries})", flush=True)
+                          f"in {wait / 60:.0f} min ({idle} of {args.retries})",
+                          flush=True)
+                    await asyncio.sleep(wait)
                 else:
                     idle = 0
                 if n >= args.max_sessions:
@@ -906,6 +920,10 @@ async def main() -> int:
     parser.add_argument("--retries", type=int, default=2,
                         help="sessions in a row that may play nothing before the "
                              "chain gives up")
+    parser.add_argument("--idle-wait", type=int, default=60,
+                        help="seconds to wait before retrying a session that played "
+                             f"nothing, doubling each time to {MAX_IDLE_WAIT // 60} "
+                             "min. A rate limit is a window, not an error")
     parser.add_argument("--obs", nargs="+", choices=CHANNELS, default=list(DEFAULT_CHANNELS),
                         help="which of the package's own observations the sessions get")
     parser.add_argument("--opening", choices=sorted(OPENING), default="blind",

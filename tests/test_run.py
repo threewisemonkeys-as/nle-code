@@ -367,7 +367,7 @@ def test_a_run_without_a_stint_is_one_session(tmp_path, monkeypatch):
             "carry_on": str(tmp_path), "replay": None, "obs": ["tty"], "budget": 500,
             "stint": stint, "max_sessions": max_sessions, "fresh_world": False,
             "agent": "claude", "model": "m", "dry_run": False, "retries": retries,
-            "opening": "named",
+            "opening": "named", "idle_wait": 0,
         })()
         report = asyncio.run(run.play("W", ("nethack", 0), tmp_path, args, {}, ["W"],
                                       asyncio.Semaphore(1)))
@@ -485,6 +485,7 @@ def test_a_session_that_plays_nothing_is_retried_and_then_gives_up(tmp_path, mon
         "carry_on": str(tmp_path), "replay": None, "obs": ["tty"], "budget": 500,
         "stint": 10, "max_sessions": 20, "fresh_world": False, "agent": "claude",
         "model": "m", "dry_run": False, "retries": 2, "opening": "named",
+        "idle_wait": 0,
     })()
     report = asyncio.run(run.play("W", ("nethack", 0), tmp_path, args, {}, ["W"],
                                   asyncio.Semaphore(1)))
@@ -495,3 +496,58 @@ def test_a_session_that_plays_nothing_is_retried_and_then_gives_up(tmp_path, mon
 
 async def _nothing():
     return "", 0
+
+
+def test_the_wait_between_idle_sessions_doubles_and_is_capped(tmp_path, monkeypatch):
+    """The retries were written for a failure that has passed by the time the next
+    session starts. A rate limit has not: it is a window, and three retries in three
+    seconds are three ways of asking the same question inside it. So the wait doubles
+    — and stops doubling at an hour, because the thing being waited out is that long
+    and checking less often than that buys nothing."""
+    ws = tmp_path / "W"
+    ws.mkdir()
+    (ws / "state.json").write_text(json.dumps(
+        {"obs": ["tty"], "actions_used": 0, "terminal": False}))
+    waits: list[float] = []
+
+    async def no_wait(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(run, "act", lambda where, *argv: _nothing_at_all())
+    monkeypatch.setattr(run, "one_session", lambda *a: _nothing())
+    monkeypatch.setattr(run, "refresh_brief", lambda w, o: None)
+    monkeypatch.setattr(run, "session_config", lambda r, label: tmp_path / "cfg")
+    monkeypatch.setattr(run, "audit_session", lambda *a, **k: run.Audit())
+    monkeypatch.setattr(run.asyncio, "sleep", no_wait)
+    (tmp_path / ".envs" / "W").mkdir(parents=True)
+    (tmp_path / ".envs" / "W" / "result.json").write_text(json.dumps(
+        {f: 0 for f in ("actions_used", "best_episode", "episodes_completed",
+                        "mean_episode", "score", "lives", "deaths", "quits", "turns",
+                        "unique_cells", "max_depth", "max_xplevel")}
+        | {"episode_scores": [], "endings": [], "roles": []}))
+
+    def go(retries, idle_wait):
+        waits.clear()
+        args = type("A", (), {
+            "carry_on": str(tmp_path), "replay": None, "obs": ["tty"], "budget": 500,
+            "stint": 10, "max_sessions": 20, "fresh_world": False, "agent": "claude",
+            "model": "m", "dry_run": False, "retries": retries, "opening": "named",
+            "idle_wait": idle_wait,
+        })()
+        report = asyncio.run(run.play("W", ("nethack", 0), tmp_path, args, {}, ["W"],
+                                      asyncio.Semaphore(1)))
+        return report, list(waits)
+
+    report, waited = go(retries=4, idle_wait=60)
+    assert report.sessions == 5, "the chain stopped somewhere other than the retries"
+    assert waited == [60, 120, 240, 480], "the wait did not double"
+    # And nothing is waited after the last one: the chain is over, so an hour spent
+    # there is an hour of a finished run.
+    assert len(waited) == report.sessions - 1
+
+    _, waited = go(retries=3, idle_wait=1800)
+    assert waited == [1800, run.MAX_IDLE_WAIT, run.MAX_IDLE_WAIT]
+
+
+async def _nothing_at_all():
+    return ""
