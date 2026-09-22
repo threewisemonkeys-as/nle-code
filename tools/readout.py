@@ -32,8 +32,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools"))
 
 from nle_game import NleGame  # noqa: E402
+from progression import BOARD, BOARD_MEDIAN, of_lives, progression  # noqa: E402
 
 # Where the curve is read off. A 400-key pilot and a 30,000-key run both want the
 # same shape of table, so the milestones that fall past the end are dropped.
@@ -102,17 +104,37 @@ def per_life(rows: list[dict], field: str) -> dict[int, int]:
     return best
 
 
+def lives_of(rows: list[dict]) -> list[dict]:
+    """Each life's high-water marks, in the order they were played.
+
+    Everything compared across lives has to come through here: the score, the clock,
+    the depth and the experience level all reset when a life does, and the tombstone
+    frame reports zeroes for all of them (F12).
+    """
+    depth, xp = per_life(rows, "depth"), per_life(rows, "xplevel")
+    score, turns = per_life(rows, "score"), per_life(rows, "turns")
+    return [
+        {"life": life, "depth": depth[life], "xp": xp[life],
+         "score": score[life], "turns": turns[life]}
+        for life in sorted(depth)
+    ]
+
+
 def curve(rows: list[dict]) -> list[dict]:
     """The run at each milestone: what it had reached by then.
 
     `best_life` and not a running total, for the reason `act.py` keeps the run total
-    to itself: a sum across lives is not a score anyone quotes.
+    to itself: a sum across lives is not a score anyone quotes. `progression` is
+    beside it because the two disagree about what progress is, and the disagreement is
+    the reason the second one is here: a score says how a game went and a rung on
+    BALROG's human-calibrated ladder says how far through it got.
     """
     out = []
     for mark in MILESTONES:
         if mark > len(rows):
             break
         seen = rows[:mark]
+        lives = lives_of(seen)
         out.append({
             "actions": mark,
             "best_life": max(per_life(seen, "score").values(), default=0),
@@ -120,6 +142,9 @@ def curve(rows: list[dict]) -> list[dict]:
             "depth": max(row["depth"] for row in seen),
             "xplevel": max(row["xplevel"] for row in seen),
             "lives": 1 + max(row["life"] for row in seen),
+            "progression": round(max(
+                (progression(one["depth"], one["xp"]) for one in lives), default=0.0
+            ), 2),
         })
     return out
 
@@ -223,6 +248,8 @@ def read(ws: Path, env_dir: Path) -> dict:
         "max_depth": record["max_depth"],
         "max_xplevel": record["max_xplevel"],
         "interface": interface(rows),
+        "lives": lives_of(rows),
+        "progression": of_lives(lives_of(rows)),
         "curve": curve(rows),
         "agent": agent(ws / "agent_stream.jsonl"),
         "keys": [row["key"] for row in rows],
@@ -241,6 +268,19 @@ def show(one: dict) -> None:
     print(f"  dlvl {one['max_depth']}, xp {one['max_xplevel']}, "
           f"{face['keys']}/{one['budget']} keys, {face['turns']} game turns "
           f"({face['turns_per_key']} per key; a person gets 2.2)")
+    got = one["progression"]
+    if got:
+        # Both rungs, never just the higher one. The ladder credits a run for the
+        # further of how deep it went and how far it levelled, and this run's two
+        # are 46.6% and 2.9% — a single number would report a character who dug
+        # past everything as half way to an ascension.
+        print(f"  progression {got['best']}% best life, {got['mean']}% mean of "
+              f"{len(got['per_life'])} lives, {got['first']}% first life "
+              f"(the board's best is {BOARD[0][1]}%, its median {BOARD_MEDIAN}%)")
+        print(f"    of which dlvl {got['depth']} is {got['depth_rung']}% and "
+              f"xp {got['xp']} is {got['xp_rung']}% — "
+              f"{'depth' if got['depth_rung'] >= got['xp_rung'] else 'experience'} "
+              f"is carrying it")
     print(f"  {face['moved_pct']}% of keys moved the clock, "
           f"{face['at_a_prompt_pct']}% were played at a prompt, "
           f"{face['wasted']} were thrown away at a --More-- "
@@ -252,10 +292,12 @@ def show(one: dict) -> None:
               f"({per} keys each) over {said['sessions']} session(s), "
               f"{said['compactions']} compactions, ${said['cost_usd']}")
     if one["curve"]:
-        print(f"  {'keys':>6}{'best life':>11}{'turns':>8}{'dlvl':>6}{'xp':>4}{'lives':>7}")
+        print(f"  {'keys':>6}{'best life':>11}{'turns':>8}{'dlvl':>6}{'xp':>4}"
+              f"{'lives':>7}{'prog':>8}")
         for mark in one["curve"]:
             print(f"  {mark['actions']:>6}{mark['best_life']:>11}{mark['turns']:>8}"
-                  f"{mark['depth']:>6}{mark['xplevel']:>4}{mark['lives']:>7}")
+                  f"{mark['depth']:>6}{mark['xplevel']:>4}{mark['lives']:>7}"
+                  f"{mark['progression']:>7.1f}%")
 
 
 def main() -> int:

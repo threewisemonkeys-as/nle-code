@@ -8,12 +8,12 @@
 
 <div class="wrap">
   <div class="mast">
-    <h1>NetHack, played blind</h1>
+    <h1>NetHack, played blind<span class="live" id="live" hidden><i></i>run in progress</span></h1>
     <p>A coding agent playing NetHack through the terminal, as it ships: an action is
        one keystroke, menus and <code>--More--</code> are its own problem, and the brief
        never says what the game is. Pick a run, then scrub it — beside each screen is
-       the plan that batch was given, the key it played, and the work the session did
-       in its workspace before playing it.</p>
+       the plan that batch was given, the key it played, the character's own condition,
+       and the work the session did in its workspace before playing it.</p>
   </div>
 
   <div class="card">
@@ -23,151 +23,1120 @@
 
   <div class="card">
     <header>
-      <h2 id="run-title">—</h2>
-      <span class="hint" id="run-hint"></span>
+      <h2>Where this sits</h2>
+      <span class="axis-pick">
+        <button class="tb small on" id="y-score">score</button>
+        <button class="tb small" id="y-prog">progression</button>
+        <span class="axis-sep">against</span>
+        <button class="tb small on" id="ax-turns">game turns</button>
+        <button class="tb small" id="ax-keys">keystrokes</button>
+        <span class="axis-sep">showing</span>
+        <button class="tb small on" id="cl-nao" title="real human games from nethack.alt.org">people</button>
+        <button class="tb small on" id="cl-bot" title="AutoAscend games from nld-aa-taster">bot</button>
+        <button class="tb small on" id="cl-agents" title="individual BALROG NLE episodes">agents</button>
+      </span>
+      <span class="hint" id="standing-hint"></span>
     </header>
-    <div class="body"><div class="screen"><pre id="screen"></pre></div></div>
+    <div class="body">
+      <div class="standing-grid">
+        <div>
+          <div class="chart-wrap"><canvas id="chart"></canvas></div>
+          <div class="chart-legend" id="chart-legend"></div>
+          <p class="note" id="chart-note"></p>
+        </div>
+        <div>
+          <table class="baselines" id="baselines"></table>
+          <p class="note" id="baseline-note"></p>
+          <h3 class="sub">On the human-calibrated ladder</h3>
+          <table class="baselines" id="board"></table>
+          <p class="note" id="board-note"></p>
+        </div>
+      </div>
+    </div>
+  </div>
 
-    <div class="transport">
-      <button id="back">◀</button>
-      <button id="play">▶ play</button>
-      <button id="fwd">▶</button>
-      <input type="range" id="slider" min="0" max="0" value="0">
-      <span class="at" id="at"></span>
+  <div class="work-grid">
+    <div>
+      <div class="card">
+        <header>
+          <h2 id="run-title">—</h2>
+          <span class="hint" id="run-hint"></span>
+        </header>
+        <div class="body">
+          <div class="screen"><pre id="screen"></pre></div>
+          <div class="legend-row">
+            <span><i class="k-depth"></i> went deeper</span>
+            <span><i class="k-xp"></i> experience level</span>
+            <span><i class="k-death"></i> life ended</span>
+            <span><i class="k-wasted"></i> key thrown into a prompt</span>
+            <span id="hand-key" hidden><i class="k-hand"></i> a new session takes over</span>
+          </div>
+        </div>
+        <div class="transport">
+          <div class="track" id="track">
+            <canvas id="trackcv"></canvas>
+            <div class="head" id="head"></div>
+            <input type="range" id="slider" min="0" max="0" value="0"
+                   aria-label="Step index">
+          </div>
+          <div class="controls">
+            <button class="tb" id="prev-batch" title="Previous batch (Shift + Left)">⇤ batch</button>
+            <button class="tb" id="prev">← key</button>
+            <button class="tb" id="play">▶ play</button>
+            <button class="tb" id="next">key →</button>
+            <button class="tb" id="next-batch" title="Next batch (Shift + Right)">batch ⇥</button>
+            <button class="tb" id="next-mark" title="Next landmark (Shift + Down)">landmark ↓</button>
+            <span class="counter num" id="counter"></span>
+            <span class="keyhint">
+              <kbd>←</kbd><kbd>→</kbd> key · <kbd>shift</kbd>+<kbd>←</kbd><kbd>→</kbd> batch ·
+              <kbd>shift</kbd>+<kbd>↓</kbd> landmark · <kbd>space</kbd> play ·
+              <kbd>home</kbd><kbd>end</kbd> jump
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <header>
+          <h2>Off the board</h2>
+          <span class="hint" id="off-hint"></span>
+          <button class="tb small" id="expand-all">show all</button>
+        </header>
+        <div class="body" id="offboard"></div>
+      </div>
     </div>
 
-    <div class="strip" id="strip"></div>
-    <div class="plan" id="plan"></div>
+    <div>
+      <div class="card">
+        <header><h2>Now</h2><span class="hint" id="now-hint"></span></header>
+        <div class="body">
+          <div class="now-line">
+            <span class="played num" id="played"></span>
+            <span class="chip" id="phase-chip"></span>
+          </div>
+          <dl class="facts" id="facts"></dl>
+          <div class="meters" id="meters"></div>
+        </div>
+      </div>
+      <div class="card">
+        <header><h2>Intent</h2><span class="hint" id="intent-hint"></span></header>
+        <div class="body" id="intent"></div>
+      </div>
+      <div class="card">
+        <header><h2>Landmarks</h2><span class="hint" id="marks-hint"></span></header>
+        <div class="body"><div class="marks" id="marks"></div></div>
+      </div>
+      <div class="card">
+        <header><h2>What it wrote down</h2><span class="hint">notes.md</span></header>
+        <div class="body" id="notes"></div>
+      </div>
+    </div>
   </div>
 
-  <div class="card">
-    <header><h2>Off the board</h2><span class="hint">what the session ran between batches</span></header>
-    <div class="work" id="work"></div>
-  </div>
+  <div class="footer" id="footer"></div>
 </div>
 
+<script type="application/json" id="bundle">/*__DATA__*/</script>
 <script>
-const RUNS = /*__DATA__*/;
+"use strict";
+const DATA = JSON.parse(document.getElementById("bundle").textContent);
+const el = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const comma = (n) => Number(n).toLocaleString("en-US");
+const ink = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
 
-const $ = (id) => document.getElementById(id);
-let run = null, at = 0, timer = null;
+const ROWS = 24, COLS = 80;
+const HEX = "0123456789abcdef";
+const HUNGER = ["satiated", "not hungry", "hungry", "weak", "fainting", "fainted",
+                "starved"];
+const CARRY = ["unencumbered", "burdened", "stressed", "strained", "overtaxed",
+               "overloaded"];
 
-/* A screen is stored as the rows that changed since the one before it, in two
-   parallel strings per row: the characters, and one hex digit of colour each.
-   Rebuilding is a fold, and the fold is cached, because a scrubber jumps. */
-function screensOf(r) {
-  if (r._cache) return r._cache;
-  const rows = [], colours = [];
-  let text = new Array(24).fill(" ".repeat(80));
-  let paint = new Array(24).fill("7".repeat(80));
-  for (const delta of r.screens) {
-    text = text.slice(); paint = paint.slice();
-    for (const [i, line, hue] of delta) { text[i] = line; paint[i] = hue; }
-    rows.push(text); colours.push(paint);
-  }
-  r._cache = [rows, colours];
-  return r._cache;
+let run = null;     /* the run being shown          */
+let at = 0;         /* index into run.steps.n       */
+let timer = null;
+let axis = "turns"; /* which x the standing chart is on */
+let yaxis = "score"; /* and what it plots up it       */
+
+/* ── screens ────────────────────────────────────────────────────────────────
+   A screen is stored as the rows that changed since the one before, with each
+   row's text right-stripped and each row's colour run-length coded. Folding
+   the whole run into memory is what the old page did and it does not survive a
+   30,000-key run — 24 rows of 80 characters, thirty thousand times, is over a
+   hundred megabytes of string. So the fold keeps checkpoints every CHUNK steps
+   and replays the deltas from the nearest one, which is at most CHUNK cheap
+   row assignments and is imperceptible.                                     */
+const CHUNK = 250;
+
+function expand(code) {
+  let out = "";
+  const re = /([A-P])(\d+)/g;
+  let m;
+  while ((m = re.exec(code)) !== null) out += HEX[m[1].charCodeAt(0) - 65].repeat(+m[2]);
+  return out;
 }
 
-function paint() {
-  const [rows, colours] = screensOf(run);
-  const text = rows[at], hue = colours[at];
+function checkpoints(r) {
+  if (r._ck) return r._ck;
+  /* The blank a delta is taken against, in the two encodings it is stored in: an
+     empty string is a right-stripped row of spaces, and `H80` is eighty cells of
+     curses colour 7 run-length coded. A row that is blank at the start and never
+     written appears in no delta, so these have to mean the same thing as the
+     builder's own starting point or that row is drawn in no colour at all. */
+  let text = new Array(ROWS).fill("");
+  let hue = new Array(ROWS).fill("H" + COLS);
+  const ck = [];
+  r.screens.forEach((delta, i) => {
+    if (i % CHUNK === 0) ck.push([text.slice(), hue.slice()]);
+    text = text.slice(); hue = hue.slice();
+    for (const [row, line, colour] of delta) { text[row] = line; hue[row] = colour; }
+  });
+  r._ck = ck;
+  return ck;
+}
+
+function stateAt(r, i) {
+  const ck = checkpoints(r);
+  const start = Math.floor(i / CHUNK);
+  let [text, hue] = ck[start];
+  text = text.slice(); hue = hue.slice();
+  for (let k = start * CHUNK; k <= i; k++) {
+    for (const [row, line, colour] of r.screens[k]) { text[row] = line; hue[row] = colour; }
+  }
+  return [text, hue];
+}
+
+function drawScreen() {
+  const [text, hue] = stateAt(run, at);
   let html = "";
-  for (let i = 0; i < text.length; i++) {
-    const line = text[i], colour = hue[i];
+  for (let i = 0; i < ROWS; i++) {
+    const line = text[i].padEnd(COLS, " "), colour = expand(hue[i]);
     let span = "", last = null;
-    for (let j = 0; j < line.length; j++) {
+    for (let j = 0; j < COLS; j++) {
       if (colour[j] !== last) {
         if (last !== null) span += "</span>";
         span += `<span class="f${colour[j]}">`;
         last = colour[j];
       }
-      span += line[j].replace("&", "&amp;").replace("<", "&lt;");
+      span += line[j] === "&" ? "&amp;" : line[j] === "<" ? "&lt;" : line[j];
     }
     html += span + (last === null ? "" : "</span>") + "\n";
   }
-  $("screen").innerHTML = html;
-
-  const step = run.steps[at];
-  $("at").textContent = `${at} / ${run.steps.length - 1}`;
-  $("slider").value = at;
-  $("strip").innerHTML = [
-    ["key", at ? step.key : "—", false],
-    ["reward", step.reward ? (step.reward > 0 ? "+" : "") + step.reward : "·", !!step.reward],
-    ["score", step.score, false],
-    ["turn", step.turns, false],
-    ["dlvl", step.depth, false],
-    ["xp", step.xplevel, false],
-    ["life", step.life + 1, false],
-  ].map(([name, value, hot]) =>
-    `<div class="stat${hot ? " hot" : ""}"><b>${value}</b><span>${name}</span></div>`
-  ).join("");
-
-  const said = run.plans[step.plan] || "";
-  const marks = [];
-  if (step.ended) marks.push(`life over: ${step.ended}`);
-  if (step.wasted) marks.push("this key was thrown into a prompt that could not take it");
-  $("plan").innerHTML =
-    (marks.length ? `<div class="mark">${marks.join(" · ")}</div>` : "") +
-    (said ? said : "<em>no plan was given with this batch</em>");
-
-  const work = run.work[step.plan];
-  $("work").innerHTML = !work || !work.length
-    ? "<p class='hint'>nothing ran between the last batch and this one.</p>"
-    : work.map(([command, out]) =>
-        `<div class="run"><div>${esc(command)}</div>` +
-        (out ? `<div class="out">${esc(out)}</div>` : "") + "</div>").join("");
+  el("screen").innerHTML = html;
 }
 
-const esc = (s) => (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+/* ── where this sits ────────────────────────────────────────────────────────
+   Log on both axes. NetHack scores are Zipfian — the NLD-NAO mean is 127,218
+   against a median of 836 — so a linear axis tall enough for the bot's best
+   game puts every other game in the bottom two percent of the plot and says
+   nothing. Log-log puts the population and this run on the same picture.
+
+   Game turns is the axis the bot's 1,934 games and this run share: NetHack's
+   xlogfile records turns, not keypresses. Keystrokes is the axis the *budget*
+   is denominated in, and on it only the published medians can stand beside a
+   run, so the cloud goes away and the page says why.                       */
+/* Which populations are drawn. All three start on; the toggles are for taking
+   one away when it crowds the picture, not for opting into it. */
+const drawn = { nao: true, bot: true, agents: true };
+
+/* The dungeon rung by dungeon level, shipped as 54 numbers so a game that
+   carries only a depth can be placed on the progression axis. Past the end of
+   the table a deeper game keeps the deepest rung rather than falling to zero —
+   the same rule `rungs()` applies in Python. */
+function rungOf(depth) {
+  const table = DATA.compare.dlvl_rung || [];
+  if (!table.length) return 0;
+  return table[Math.max(0, Math.min(depth, table.length - 1))] || 0;
+}
+
+/* The populations of complete games, in draw order: the bigger, paler cloud
+   first so the smaller one is not buried under it. Each is [turns, score,
+   depth] per game — the three things an xlogfile can give us. */
+function naoCloud() {
+  return (DATA.compare.nao || {}).sample || [];
+}
+
+function clouds() {
+  const out = [];
+  const people = naoCloud();
+  if (drawn.nao && people.length) {
+    out.push({ key: "nao", games: people, ink: "--warn" });
+  }
+  if (drawn.bot && (DATA.compare.autoascend.games || []).length) {
+    out.push({ key: "bot", games: DATA.compare.autoascend.games, ink: "--ink-3" });
+  }
+  return out;
+}
+
+function chartBox() {
+  const c = el("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(320, c.clientWidth), h = 340;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return { g, w, h, pad: { l: 46, r: 16, t: 14, b: 32 } };
+}
+
+function drawChart() {
+  if (!run) return;
+  const prog = yaxis === "prog";
+  const { g, w, h, pad } = chartBox();
+  const cloud = DATA.compare.autoascend.games || [];
+  const mine = prog ? progCurve() : (run.curves[axis] || []);
+  const xMax = axis === "turns"
+    ? Math.max(1e5, ...mine.map((p) => p[0]))
+    : Math.max(run.budget, 3e4);
+  /* The people's tail is far longer than the bot's — the top human game on this
+     archive scores 9.1 billion against AutoAscend's 250,914 — so the ceiling
+     lifts a decade when that cloud is in. It still does not reach the very top:
+     the dots above it are clipped to the plot box rather than drawn over the
+     page, and the note counts them. */
+  const yMax = prog ? 100
+    : (axis === "turns" ? (drawn.nao && naoCloud().length ? 1e6 : (cloud.length ? 3e5 : 1e4)) : 1e4);
+  const lx = (v) => pad.l + (Math.log10(Math.max(1, v)) / Math.log10(xMax)) * (w - pad.l - pad.r);
+  /* Score is log because NetHack scores are Zipfian; progression is linear
+     because it is already a probability and 0 to 100 is the whole of it. */
+  const ly = prog
+    ? (v) => h - pad.b - (Math.max(0, Math.min(100, v)) / 100) * (h - pad.t - pad.b)
+    : (v) => h - pad.b - (Math.log10(Math.max(1, v)) / Math.log10(yMax)) * (h - pad.t - pad.b);
+
+  g.font = "10px ui-monospace, monospace";
+  g.strokeStyle = ink("--line"); g.fillStyle = ink("--ink-3"); g.lineWidth = 1;
+  for (let p = 1; Math.pow(10, p) <= xMax; p++) {
+    const v = Math.pow(10, p);
+    g.beginPath(); g.moveTo(lx(v), pad.t); g.lineTo(lx(v), h - pad.b); g.stroke();
+    g.textAlign = "center";
+    g.fillText(v >= 1000 ? v / 1000 + "k" : String(v), lx(v), h - pad.b + 13);
+  }
+  g.textAlign = "right";
+  if (prog) {
+    for (let v = 0; v <= 100; v += 20) {
+      g.beginPath(); g.moveTo(pad.l, ly(v)); g.lineTo(w - pad.r, ly(v)); g.stroke();
+      g.fillText(v + "%", pad.l - 6, ly(v) + 3);
+    }
+  } else {
+    for (let p = 1; Math.pow(10, p) <= yMax; p++) {
+      const v = Math.pow(10, p);
+      g.beginPath(); g.moveTo(pad.l, ly(v)); g.lineTo(w - pad.r, ly(v)); g.stroke();
+      g.fillText(v >= 1000 ? v / 1000 + "k" : String(v), pad.l - 6, ly(v) + 3);
+    }
+  }
+  g.textAlign = "left";
+  g.fillText(axis === "turns" ? "game turns" : "keystrokes spent",
+             pad.l + 2, h - pad.b + 13 + 11);
+  g.save(); g.translate(11, pad.t + 4); g.rotate(-Math.PI / 2);
+  g.textAlign = "right";
+  g.fillText(prog ? "progression" : "score", 0, 0); g.restore();
+
+  /* The two populations of complete games, one dot each.
+
+     Both are drawn on either y, but they mean different things on each. On
+     score they are exact. On progression they are a LOWER BOUND and nothing
+     else: an xlogfile records `maxlvl` and has no experience level at all, so
+     only the dungeon rung can be read off them, and progression is the higher
+     of the two rungs. The note under the chart says so, and the dots are drawn
+     hollow there to keep the distinction visible rather than only written down.
+
+     Neither goes on the keystroke axis, because neither records keypresses. */
+  if (axis === "turns") {
+    g.save();
+    g.beginPath();
+    g.rect(pad.l, pad.t, w - pad.l - pad.r, h - pad.t - pad.b);
+    g.clip();
+    for (const pop of clouds()) {
+      g.lineWidth = 1;
+      for (const [turns, score, depth, won] of pop.games) {
+        /* A won game is drawn at 100 and not at its rung. `death=ascended` is a
+           fact in the record; the rung cannot express it, because the ladder's
+           ascension entries are message strings the progress system never looks
+           up. Drawing a winner at 80% would put the chart's own ceiling above
+           the only thing the axis was built to measure. */
+        if (prog && won) {
+          g.globalAlpha = 0.9; g.fillStyle = ink("--good");
+          g.beginPath(); g.arc(lx(turns), ly(100), 2.6, 0, 7); g.fill();
+          continue;
+        }
+        g.globalAlpha = prog ? 0.3 : 0.22;
+        g.strokeStyle = g.fillStyle = ink(won ? "--good" : pop.ink);
+        if (!prog && won) g.globalAlpha = 0.9;
+        const y = prog ? ly(rungOf(depth)) : ly(score);
+        g.beginPath(); g.arc(lx(turns), y, won ? 2.6 : 1.7, 0, 7);
+        prog && !won ? g.stroke() : g.fill();
+      }
+      g.globalAlpha = 1;
+    }
+    g.restore();
+  }
+
+  /* The ceiling, drawn where it actually is. The axis runs to 100 because that is
+     what the metric claims to measure, but no level on the ladder scores more than
+     80.68 — so the band above that line is unreachable, and saying so is the
+     difference between a chart with headroom and a chart with a lie in it. */
+  if (prog && DATA.compare.ceiling) {
+    const y = ly(DATA.compare.ceiling);
+    g.strokeStyle = ink("--bad"); g.setLineDash([2, 4]); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(pad.l, y); g.lineTo(w - pad.r, y); g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = ink("--bad"); g.textAlign = "right"; g.globalAlpha = 0.85;
+    g.fillText(`${DATA.compare.ceiling}% — the highest any rung goes`, w - pad.r - 3,
+               y - 4);
+    g.globalAlpha = 1; g.textAlign = "left";
+  }
+
+  if (prog) {
+    /* Every individual BALROG episode, as a tick against the y axis and not a
+       dot in the field. They have no x: their `num_steps` counts wrapper
+       actions — one of which may be a whole travel command — so it is neither
+       a game turn nor a keystroke, and placing them along either axis would be
+       inventing a measurement. The y is exact, which is the point of drawing
+       them at all: it is the same ladder, computed by the people who built it. */
+    if (drawn.agents) {
+      const eps = DATA.compare.agents || [];
+      g.strokeStyle = ink("--peer"); g.lineWidth = 1.5; g.globalAlpha = 0.5;
+      for (const one of eps) {
+        const y = ly(one.prog);
+        g.beginPath(); g.moveTo(pad.l + 1, y); g.lineTo(pad.l + 13, y); g.stroke();
+      }
+      g.globalAlpha = 1;
+    }
+    /* The other agents, measured on this exact ladder by the people who built
+       it. Horizontal, because a board entry is a mean over episodes and has no
+       position along either x axis. */
+    for (const row of DATA.compare.board.slice(0, 4)) {
+      const y = ly(row.prog);
+      g.strokeStyle = ink("--ink-3"); g.setLineDash([3, 3]); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(pad.l, y); g.lineTo(w - pad.r, y); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = ink("--ink-3"); g.textAlign = "left";
+      g.fillText(`${row.name} ${row.prog}%`, pad.l + 4, y - 3);
+    }
+  } else {
+    /* The published medians, as crosshairs. The human one is the line to beat. */
+    for (const row of DATA.compare.published) {
+      const x = lx(axis === "turns" ? row.turns : row.keys), y = ly(row.score);
+      g.strokeStyle = row.human ? ink("--warn") : ink("--ink-3");
+      g.setLineDash([3, 3]); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(pad.l, y); g.lineTo(w - pad.r, y); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = row.human ? ink("--warn") : ink("--ink-3");
+      g.beginPath(); g.arc(x, y, 4, 0, 7); g.fill();
+      g.textAlign = "left";
+      g.fillText(row.human ? "median human game" : "median AutoAscend game",
+                 Math.min(w - pad.r - 130, x + 7), y - 5);
+    }
+  }
+
+  /* This run, at every step of the way. */
+  if (mine.length) {
+    g.strokeStyle = ink("--act"); g.lineWidth = 2.4; g.beginPath();
+    mine.forEach(([x, y], i) => (i ? g.lineTo(lx(x), ly(y)) : g.moveTo(lx(x), ly(y))));
+    g.stroke();
+    const here = axis === "turns" ? turnsAt(at) : run.steps.n[at];
+    let value = 0;
+    for (const [x, y] of mine) { if (x <= here) value = y; else break; }
+    g.fillStyle = ink("--act");
+    g.beginPath(); g.arc(lx(here), ly(value), 4.5, 0, 7); g.fill();
+  }
+}
+
+/* The best rung reached by each point, against whichever x is chosen. Built
+   here rather than in the bundle because it is a running maximum over a column
+   the page already has, and the score curves are thinned in Python only because
+   they are drawn against a population that had to be thinned with them. */
+function progCurve() {
+  if (run._prog && run._prog.axis === axis) return run._prog.pairs;
+  const pairs = [];
+  let best = 0, lastX = -1;
+  for (let i = 0; i < run.steps.n.length; i++) {
+    best = Math.max(best, run.steps.prog[i]);
+    const x = axis === "turns" ? run._turnsBy[i] : run.steps.n[i];
+    if (x === lastX && pairs.length) pairs[pairs.length - 1][1] = best;
+    else { pairs.push([x, best]); lastX = x; }
+  }
+  run._prog = { axis, pairs };
+  return pairs;
+}
+
+/* Game turns spent by a step, summed over lives: the clock restarts with a
+   life, so the last reading is not the total. */
+function turnsAt(i) {
+  return run._turnsBy[i];
+}
+
+function buildLegend() {
+  const bot = DATA.compare.autoascend.score;
+  const prog = yaxis === "prog";
+  if (prog) {
+    const p = run.progression || {};
+    const nao = DATA.compare.nao || {};
+    const eps = DATA.compare.agents || [];
+    el("chart-legend").innerHTML =
+      `<span><i style="background:${ink("--act")}"></i>this run — ` +
+      `${progSoFar(at)}% reached by here, ${p.best}% best life</span>` +
+      (axis === "turns" && drawn.nao && nao.games
+        ? `<span><i class="people"></i>${comma(nao.games)} human games ` +
+          `(${comma(naoCloud().length)} drawn) — lower bound</span>` : "") +
+      (axis === "turns" && drawn.bot && bot.n
+        ? `<span><i class="cloud"></i>${comma(bot.n)} AutoAscend games — lower bound</span>`
+        : "") +
+      (axis === "turns" && drawn.nao && nao.ascended
+        ? `<span><i class="won"></i>${comma(nao.ascended)} ascensions ` +
+          `(${nao.ascended_pct}%) — drawn at 100%</span>` : "") +
+      (drawn.agents && eps.length
+        ? `<span><i class="peer"></i>${comma(eps.length)} BALROG episodes — exact</span>`
+        : "") +
+      `<span><i class="dash"></i>the board's means, on this same ladder</span>`;
+    el("chart-note").innerHTML =
+      `<b>Progression against ${axis === "turns" ? "game turns" : "keystrokes"}</b>.
+       The rung is the probability that a human player went on to <i>ascend</i>, given
+       that they had reached this dungeon level or this experience level — built by
+       BALROG from a dataset of human games, with level 1 as 0% and ascension as 100%,
+       and a run credited with the higher of its two rungs. Linear, not log: it is
+       already a probability.` +
+      (axis === "turns" && ((drawn.nao && nao.games) || (drawn.bot && bot.n))
+        ? ` <b>The hollow dots are a lower bound, not a score.</b> An
+       <code>xlogfile</code> records the deepest dungeon level and <i>no experience
+       level at all</i>, so for those games only one of the two rungs can be computed,
+       and progression is the higher of the two. A game is plotted at the rung we can
+       see, which is at or below the one it earned. The bound is tight for the deep
+       games and loose for the shallow ones — ${nao.games ? nao.prog.at_zero_pct + "% of the human games never left dungeon level 1" : "many of them never left dungeon level 1"},
+       and those sit on the floor whatever their character had become.` : "") +
+      (drawn.agents && eps.length
+        ? ` The ticks on the left are <b>${comma(eps.length)} individual BALROG
+       episodes</b> — the only other trajectories anywhere that carry this metric
+       natively, and exact because the wrapper recorded both rungs. They have no
+       position along the x axis: their step counts wrapper actions, not game turns or
+       keystrokes. The best single episode on the whole board reaches
+       ${Math.max(...eps.map((e) => e.prog))}%.` : "") +
+      ` The dashed lines are the top of BALROG's own NLE board, and they are
+       <b>not like-for-like</b> — those agents play a language-wrapped NLE with menus
+       handled for them, in independent 500-step episodes with no memory, where these
+       lives share one dungeon and one notes file. The comparable number is this run's
+       <b>first life, ${p.first}%</b>.` +
+      (DATA.compare.ceiling
+        ? ` <b>Nothing can score 100% on this metric.</b> The ladder holds 87 entries
+       and only 80 are levels; the other seven are message strings —
+       <code>Astral Plane</code>, <code>You ascend t</code> — which BALROG's
+       NetHackChallenge progress system never looks up, because it builds its keys as
+       <code>Dlvl:n</code> and <code>Xp:n</code> and nothing else. The red line at
+       <b>${DATA.compare.ceiling}%</b> is the highest any level reaches, for every
+       agent on that board and for this run alike.` : "") +
+      (drawn.nao && nao.ascended
+        ? ` The green dots are the <b>${comma(nao.ascended)} human games that actually
+       won</b> — ${nao.ascended_pct}% of them — placed at the 100% the ladder defines
+       rather than at the rung it can compute, because <code>death=ascended</code> is a
+       fact in the record. Through the rung they would sit between 78.59% and
+       ${DATA.compare.ceiling}%, and worse: you finish NetHack from the Sanctum, not
+       from the bottom, so <b>1,963 of those winners never reached dungeon level
+       50</b> and a depth-only reading ranks the 249 people who died down there above
+       them.` : "");
+    return;
+  }
+  const nao = DATA.compare.nao || {};
+  el("chart-legend").innerHTML =
+    `<span><i style="background:${ink("--act")}"></i>this run — best life so far ` +
+    `${comma(bestSoFar(at))} points</span>` +
+    (axis === "turns" && drawn.nao && nao.games
+      ? `<span><i class="people"></i>${comma(nao.games)} human games ` +
+        `(${comma(naoCloud().length)} drawn)</span>` : "") +
+    (axis === "turns" && drawn.bot && bot.n
+      ? `<span><i class="cloud"></i>${comma(bot.n)} AutoAscend games on this disk</span>`
+      : "") +
+    `<span><i class="human"></i>median human game (836 points)</span>`;
+  el("chart-note").innerHTML = axis === "turns"
+    ? `<b>Score against game turns</b>, both on log axes, because NetHack scores are
+       Zipfian — the human median is 836 and the human mean is 127,218. Turns is the
+       axis every cloud here shares with this run: NetHack's own <code>xlogfile</code>
+       records game turns and not keypresses.` +
+      (drawn.bot && bot.n ? ` Every grey dot is one complete AutoAscend game from
+       <code>nld-aa-taster</code>, run to its death.` : "") +
+      (drawn.nao && nao.games ? ` Every amber dot is one <b>real human game</b> of
+       NetHack ${nao.version} from nethack.alt.org's own archive — ${comma(naoCloud().length)}
+       drawn at random from ${comma(nao.games)}, with the quantiles beside the chart
+       computed over all of them. That population is games where the character took at
+       least one action: ${comma(nao.raw_games - nao.games)} of the
+       ${comma(nao.raw_games)} records in the file are connect-and-quit sessions that
+       never moved, and counting them would put the median human game at one turn.` : "") +
+      ` The blue line is this run's best single life as it stood at each point.`
+    : `<b>Score against keystrokes</b>, which is what the budget is denominated in and
+       therefore the axis this harness actually spends. The bot's games are not on it:
+       the xlogfile records turns, and a ttyrec's frame count is redraws rather than
+       keys. What can stand here are the published medians — the median human game is
+       <b>1,724 keystrokes</b> long and scores <b>836</b>.`;
+}
+
+function progSoFar(i) {
+  let best = 0;
+  for (let k = 0; k <= i; k++) best = Math.max(best, run.steps.prog[k]);
+  return best.toFixed(2);
+}
+
+function bestSoFar(i) {
+  const c = run.curves.keys;
+  const here = run.steps.n[i];
+  let best = 0;
+  for (const [x, y] of c) { if (x <= here) best = y; else break; }
+  return best;
+}
+
+function buildBaselines() {
+  const bot = DATA.compare.autoascend;
+  const rows = [];
+  if (bot.score.n) {
+    rows.push({
+      name: "AutoAscend, this disk", what: `median of ${comma(bot.score.n)} games`,
+      score: bot.score.median, turns: bot.turns.median, keys: null,
+    });
+  }
+  /* Measured here, and kept separate from the quoted median below it on purpose:
+     the two are different populations, not two readings of one. */
+  const nao = DATA.compare.nao || {};
+  if (nao.games) {
+    rows.push({
+      name: `people, NetHack ${nao.version}`,
+      what: `median of ${comma(nao.games)} games, measured`,
+      score: nao.score.median, turns: nao.turns.median, keys: null, human: true,
+    });
+  }
+  for (const p of DATA.compare.published) {
+    rows.push({ name: p.name, what: `median of ${comma(p.games)} games, published`,
+                score: p.score, turns: p.turns, keys: p.keys, human: p.human });
+  }
+  rows.push({
+    name: "this run", what: `best of ${plural(run.lives, "life").replace("lifes", "lives")}`,
+    score: run.best, turns: run.turns, keys: run.used, mine: true,
+  });
+  for (const f of DATA.compare.floors) {
+    rows.push({ name: f.name, what: "measured floor, 5 seeds",
+                score: f.score, turns: f.turns, keys: f.keys, floor: true });
+  }
+  rows.sort((a, b) => b.score - a.score);
+  el("baselines").innerHTML =
+    "<tr><th>who</th><th>what</th><th>score</th><th>turns</th><th>keys</th></tr>" +
+    rows.map((r) =>
+      `<tr class="${r.mine ? "mine" : r.human ? "human" : ""}">` +
+      `<td>${esc(r.name)}</td><td class="what">${esc(r.what)}</td>` +
+      `<td>${comma(r.score)}</td><td>${comma(r.turns)}</td>` +
+      `<td>${r.keys == null ? "—" : comma(r.keys)}</td></tr>`).join("");
+  el("baseline-note").innerHTML =
+    `The bot's and the people's games each ended once and were scored on that; this
+     run's number is its <b>best single life</b>, because a sum across lives is not a
+     score anyone quotes and cannot be compared with a population of games that ended.
+     The floors are <code>tools/baselines.py</code> playing by exactly this harness's
+     rules.` + (bot.score.n ? ` The taster on this disk is a faithful sample of the
+     published set — its median game scores ${comma(bot.score.median)} against the
+     paper's 5,422 — which is the check that makes the cloud worth drawing.` : "") +
+    (nao.games ? ` The measured human row and the published one are <b>two different
+     populations</b>, not two readings of one: the first is ${comma(nao.games)} games of
+     NetHack ${nao.version} from nethack.alt.org, the second is the ${comma(1511228)}-game
+     NLD-NAO set from around 2020, mostly older versions and filtered by a rule its
+     authors did not publish. Neither is wrong and the gap between them is real.` : "");
+  el("standing-hint").textContent =
+    (nao.games ? `${comma(nao.games)} human games · ` : "") +
+    (bot.score.n ? `${comma(bot.score.n)} bot games · ` : "") +
+    ((DATA.compare.agents || []).length
+      ? `${comma(DATA.compare.agents.length)} board episodes · ` : "") +
+    `${DATA.compare.published.length} published medians · ` +
+    `${DATA.compare.floors.length} measured floors · ` +
+    `${DATA.compare.board_n} agents on the ladder`;
+}
+
+/* The ladder, and who is on it. Three numbers for this run rather than one,
+   because they answer different questions and only one of them is comparable:
+   `first` is a life played before the run had learned anything, which is the
+   only one measured under the board's own conditions; `best` is the furthest
+   any life got, and is flattered by a run whose lives share a dungeon and a
+   notes file; `recent` says whether it is still climbing. */
+function buildBoard() {
+  const p = run.progression || {};
+  /* `== null` and not falsiness: a run still on dungeon level 1 scores a perfectly
+     good 0%, and testing the number itself hid the whole panel for exactly the runs
+     that most need the board drawn above them. */
+  if (p.best == null) {
+    el("board").innerHTML = "";
+    el("board-note").innerHTML = "";
+    return;
+  }
+  const nao = DATA.compare.nao || {};
+  const rows = DATA.compare.board.map((b) => ({ name: b.name, prog: b.prog,
+    what: "mean of its episodes" }));
+  if (nao.games) {
+    rows.push({ name: `people, NetHack ${nao.version}`, prog: nao.prog.median,
+                what: `median of ${comma(nao.games)} games, depth rung only` });
+  }
+  rows.push({ name: "this run — best life", prog: p.best, mine: true,
+              what: `dlvl ${p.depth}, xp ${p.xp}` });
+  rows.push({ name: "this run — mean of lives", prog: p.mean, mine: true,
+              what: `${p.per_life.length} lives, aborted ones included` });
+  rows.push({ name: "this run — first life", prog: p.first, mine: true, first: true,
+              what: "before it had learned anything" });
+  rows.sort((a, b) => b.prog - a.prog);
+  el("board").innerHTML =
+    "<tr><th>who</th><th>what</th><th>progression</th></tr>" +
+    rows.map((r) =>
+      `<tr class="${r.mine ? "mine" : ""}${r.first ? " like" : ""}">` +
+      `<td>${esc(r.name)}</td><td class="what">${esc(r.what)}</td>` +
+      `<td>${r.prog.toFixed(2)}%</td></tr>`).join("") +
+    `<tr><td>median of the board</td><td class="what">${DATA.compare.board_n}` +
+    ` submissions</td><td>${DATA.compare.board_median.toFixed(2)}%</td></tr>`;
+  el("board-note").innerHTML =
+    `Its two rungs, kept apart: dungeon level ${p.depth} is <b>${p.depth_rung}%</b>
+     and experience level ${p.xp} is <b>${p.xp_rung}%</b>. The metric credits the
+     higher, so the headline is the depth — this character dug past the content that
+     would have levelled it, and the gap between those two numbers is the reason
+     ascension is not close. Only the <span class="like">first life</span> row is
+     measured under the board's conditions: the others had a notes file.` +
+    (nao.depth_cdf ? ` Against real people, the depth rung is the honest comparison,
+     because it is the only rung an <code>xlogfile</code> records for either side:
+     <b>${(100 - nao.depth_cdf[Math.min(p.depth - 1, nao.depth_cdf.length - 1)]).toFixed(2)}%</b>
+     of ${comma(nao.games)} human games of NetHack ${nao.version} reached dungeon level
+     ${p.depth} or deeper. That is a statement about depth alone — those same people
+     were levelling their characters on the way down, which this run did not.` : "");
+}
+
+/* ── the track ──────────────────────────────────────────────────────────────
+   One canvas and not a div per event. Craftax's track put an element on the
+   page for every batch and every mark, which is fine for three thousand
+   actions and is thirty thousand nodes here. Drawn once per run and on resize;
+   the cursor is the only thing that moves.                                  */
+function drawTrack() {
+  const c = el("trackcv");
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, c.clientWidth), h = 56;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const n = run.steps.n.length;
+  const px = (i) => (i / Math.max(1, n - 1)) * w;
+
+  /* Top band: how much work went into the batch played at each column. */
+  const load = new Array(Math.ceil(w)).fill(0);
+  run.starts.forEach((start, b) => {
+    const calls = (run.work[b] || []).filter((m) => m.kind === "tool").length;
+    if (!calls) return;
+    const col = Math.min(load.length - 1, Math.floor(px(run._firstStep[b] || 0)));
+    load[col] = Math.max(load[col], calls);
+  });
+  const busiest = Math.max(1, ...load);
+  g.fillStyle = ink("--off");
+  load.forEach((v, x) => {
+    if (!v) return;
+    const tall = Math.max(1.5, (12 * v) / busiest);
+    g.globalAlpha = 0.55; g.fillRect(x, 12 - tall, 1, tall); g.globalAlpha = 1;
+  });
+
+  /* Middle: the score of the life being played. The saw-tooth is the lives. */
+  const top = Math.max(1, ...run.steps.score);
+  g.beginPath(); g.moveTo(0, 44);
+  for (let i = 0; i < n; i++) g.lineTo(px(i), 44 - (run.steps.score[i] / top) * 28);
+  g.lineTo(w, 44); g.closePath();
+  g.fillStyle = ink("--good") + "33"; g.fill();
+  g.strokeStyle = ink("--good"); g.lineWidth = 1; g.stroke();
+
+  /* Bottom: the landmarks, and the keys that bought nothing. */
+  const tint = { depth: "--act", xp: "--good", death: "--bad", hand: "--off" };
+  g.fillStyle = ink("--warn"); g.globalAlpha = 0.5;
+  for (const i of run.steps.wasted) g.fillRect(px(i), 46, 1, 4);
+  g.globalAlpha = 1;
+  for (const m of run.milestones) {
+    if (m.kind === "score") continue;   /* too many to read, and on the curve */
+    g.fillStyle = ink(tint[m.kind] || "--ink-3");
+    g.fillRect(Math.min(w - 1.5, px(m.at)), 44, 1.5, 12);
+  }
+}
+
+/* ── panels ─────────────────────────────────────────────────────────────── */
+const fact = (label, value) =>
+  `<div class="fact"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
+
+function renderNow() {
+  const s = run.steps;
+  const died = s.ended[String(at)];
+  el("played").textContent = at === 0 ? "start" : "key " + comma(s.n[at]);
+  const chip = el("phase-chip");
+  const newLife = s.key[at] === "(new life)";
+  chip.className = "chip " + (died ? "critical" : newLife ? "warning" : "");
+  chip.textContent = died ? "this life ended" : newLife ? "began again"
+    : at === 0 ? "before anything" : s.prompt[at] ? "at a " + s.prompt[at] : "playing";
+
+  const b = s.batch[at];
+  const inBatch = b >= 0 ? at - run._firstStep[b] + 1 : 0;
+  const ofBatch = b >= 0 ? (run._lastStep[b] - run._firstStep[b] + 1) : 0;
+  el("facts").innerHTML =
+    fact("budget", `${comma(s.n[at])}/${comma(run.budget)}`) +
+    fact("played", at === 0 ? "—" : s.key[at]) +
+    fact("in batch", ofBatch ? `${inBatch}/${ofBatch}` : "—") +
+    fact("reward", s.reward[at] ? (s.reward[at] > 0 ? "+" : "") + s.reward[at] : "0") +
+    fact("score", comma(s.score[at])) +
+    fact("game turn", comma(s.turns[at])) +
+    fact("dungeon lvl", s.depth[at]) +
+    fact("experience", s.xp[at]) +
+    fact("progression", s.prog[at] + "%") +
+    fact("gold", comma(s.gold[at])) +
+    fact("armour class", s.ac[at]) +
+    fact("life", `${s.life[at] + 1}/${run.lives}`) +
+    fact("session", `${sessionAt(at)}/${run.handovers.length + 1}`);
+  el("meters").innerHTML =
+    meter("hp", s.hp[at], s.hpmax[at]) +
+    meter("pw", s.pw[at], s.pwmax[at]) +
+    `<div class="meter${s.hunger[at] >= 3 ? " low" : ""}"><span>food</span>
+       <div class="bar"><i style="width:${s.hunger[at] <= 1 ? 100 : Math.max(4, 100 - s.hunger[at] * 22)}%"></i></div>
+       <b>${esc(HUNGER[s.hunger[at]] || s.hunger[at])}</b></div>` +
+    (s.carry[at] ? `<div class="meter low"><span>load</span>
+       <div class="bar"><i style="width:${Math.max(4, 100 - s.carry[at] * 18)}%"></i></div>
+       <b>${esc(CARRY[s.carry[at]] || s.carry[at])}</b></div>` : "");
+  el("now-hint").textContent = `${run.label} · seed ${run.seed}`;
+}
+
+function meter(name, value, max) {
+  const pct = max ? Math.max(0, Math.min(100, (100 * value) / max)) : 0;
+  return `<div class="meter${max && value / max <= 0.34 ? " low" : ""}">
+    <span>${name}</span><div class="bar"><i style="width:${pct}%"></i></div>
+    <b>${value}/${max}</b></div>`;
+}
+
+function sessionAt(i) {
+  let now = 1;
+  for (const h of run.handovers) if (i >= h.at) now = h.session;
+  return now;
+}
+
+function renderIntent() {
+  const b = run.steps.batch[at];
+  const box = el("intent");
+  if (b < 0) {
+    box.innerHTML = `<p class="plan none">The state before anything was played.</p>`;
+    el("intent-hint").textContent = "";
+    return;
+  }
+  el("intent-hint").textContent = `batch ${b + 1} of ${comma(run.plans.length)}`;
+  const from = run._firstStep[b], to = run._lastStep[b];
+  const keys = [];
+  for (let i = from; i <= to && i < run.steps.n.length; i++) {
+    keys.push(`<b class="${i === at ? "at" : i < at ? "done" : ""}">` +
+              `${esc(run.steps.key[i])}</b>`);
+  }
+  const call = run.played[b] || {};
+  box.innerHTML =
+    (run.plans[b] ? `<p class="plan">${esc(run.plans[b])}</p>`
+                  : `<p class="plan none">No plan was stated for this batch.</p>`) +
+    `<div class="tok">${keys.join("")}</div>` +
+    (call.title ? `<pre class="code">${esc(oneline(call.title, 600))}</pre>` : "") +
+    (call.out ? `<pre class="code out">${esc(call.out)}</pre>` : "");
+}
+
+function renderMarks() {
+  const box = el("marks");
+  const reached = run.milestones.filter((m) => m.at <= at).length;
+  el("marks-hint").textContent =
+    `${reached} of ${run.milestones.length} reached`;
+  box.innerHTML = run.milestones.map((m, i) =>
+    `<b class="${m.kind} ${m.at === at ? "now" : m.at < at ? "got" : ""}" data-at="${m.at}">
+       <span>${m.at === 0 ? "start" : comma(run.steps.n[m.at])}</span>
+       <em>${esc(m.text)}</em></b>`).join("");
+  box.querySelectorAll("b[data-at]").forEach((b) =>
+    b.addEventListener("click", () => { stop(); show(+b.dataset.at); }));
+  const now = box.querySelector("b.now") || box.querySelector("b:not(.got)");
+  if (now) now.scrollIntoView({ block: "nearest" });
+}
+
+let wideOpen = false;
+
+function renderWork() {
+  const b = run.steps.batch[at];
+  const all = b >= 0 ? (run.work[b] || []) : [];
+  const work = all.filter((m) => m.kind !== "think");
+  const sealed = all.length - work.length;
+  const calls = work.filter((m) => m.kind === "tool").length;
+  el("off-hint").textContent =
+    (b >= 0 ? `before batch ${b + 1}` : "before the first key") +
+    ` · ${plural(calls, "call")}` +
+    (sealed ? ` · ${sealed} sealed reasoning` : "") + " · costs no budget";
+  const box = el("offboard");
+  if (!work.length) {
+    /* Usually not idleness. One call to a script the session wrote plays many
+       batches, and the working-out sits on the first of them — so the panel
+       says which batch to look at rather than showing an empty room. */
+    let back = -1;
+    for (let k = b - 1; k >= 0; k--) {
+      if ((run.work[k] || []).some((m) => m.kind === "tool")) { back = k; break; }
+    }
+    box.innerHTML = `<p class="empty">Nothing ran between the last batch and this one` +
+      (sealed ? `, only ${plural(sealed, "reasoning block")} the CLI returned encrypted`
+              : "") + `.` +
+      (back >= 0 ? ` One call played several batches in a row; the working-out is on
+        <a href="#" id="back-to-work">batch ${back + 1}</a>.` : "") + `</p>`;
+    const link = el("back-to-work");
+    if (link) link.addEventListener("click", (e) => {
+      e.preventDefault(); stop(); show(run._firstStep[back]);
+    });
+    return;
+  }
+  box.innerHTML = work.map(renderMoment).join("");
+  if (wideOpen) box.querySelectorAll("pre.full").forEach((pre) => {
+    pre.hidden = false;
+    pre.closest(".evt").querySelector("button.more").textContent = "hide";
+  });
+  box.querySelectorAll("button.more").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pre = btn.closest(".evt").querySelector("pre.full");
+      pre.hidden = !pre.hidden;
+      btn.textContent = pre.hidden ? "show" : "hide";
+    });
+  });
+}
+
+/* A command's first line is `./python -c "` more often than not, so the label
+   is the whole thing with its whitespace flattened — what it ran is then in
+   the label rather than behind the toggle. */
+function oneline(s, n) {
+  const flat = String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+  return flat.length > n ? flat.slice(0, n) + "…" : flat;
+}
+
+function renderMoment(m) {
+  if (m.kind === "say") {
+    return `<div class="evt"><div class="top"><span class="tag">said</span></div>
+      <div class="said">${esc(m.text)}</div></div>`;
+  }
+  const body = [m.body, m.out].filter(Boolean).join("\n\n— output —\n");
+  return `<div class="evt">
+    <div class="top">
+      <span class="tag">${esc(m.name || "?")}</span>
+      <span class="name">${esc(oneline(m.title, 160))}</span>
+      ${body ? `<button class="tb small more">show</button>` : ""}
+    </div>
+    ${m.why ? `<div class="why">${esc(m.why)}</div>` : ""}
+    ${body ? `<pre class="code ${m.error ? "err" : ""} full" hidden>${esc(body)}</pre>`
+           : ""}
+  </div>`;
+}
+
+/* ── driving ────────────────────────────────────────────────────────────── */
+function show(i) {
+  at = Math.max(0, Math.min(run.steps.n.length - 1, i));
+  el("slider").value = String(at);
+  el("head").style.left = (100 * at) / Math.max(1, run.steps.n.length - 1) + "%";
+  el("counter").textContent =
+    `key ${comma(run.steps.n[at])} of ${comma(run.used)} played` +
+    (run.budget > run.used ? ` · ${comma(run.budget)} budgeted` : "");
+  drawScreen();
+  renderNow();
+  renderIntent();
+  renderMarks();
+  renderWork();
+  drawChart();
+  buildLegend();
+}
+
+function jumpBatch(dir) {
+  const want = run.steps.batch[at] + dir;
+  if (want < 0) return show(0);
+  if (want >= run.plans.length) return show(run.steps.n.length - 1);
+  show(run._firstStep[want]);
+}
+
+function jumpMark(dir) {
+  const marks = run.milestones;
+  if (dir > 0) {
+    const next = marks.find((m) => m.at > at);
+    return show(next ? next.at : run.steps.n.length - 1);
+  }
+  const back = [...marks].reverse().find((m) => m.at < at);
+  return show(back ? back.at : 0);
+}
+
+function stop() {
+  if (timer) { clearInterval(timer); timer = null; el("play").textContent = "▶ play"; }
+}
+
+function toggle() {
+  if (timer) return stop();
+  el("play").textContent = "❚❚ pause";
+  timer = setInterval(() => {
+    if (at >= run.steps.n.length - 1) return stop();
+    show(at + 1);
+  }, 90);
+}
+
+/* ── loading a run ──────────────────────────────────────────────────────── */
+function index(r) {
+  const n = r.steps.n.length;
+  r._firstStep = new Array(r.plans.length).fill(0);
+  r._lastStep = new Array(r.plans.length).fill(0);
+  let seen = -1;
+  for (let i = 0; i < n; i++) {
+    const b = r.steps.batch[i];
+    if (b < 0) continue;
+    if (b !== seen) { r._firstStep[b] = i; seen = b; }
+    r._lastStep[b] = i;
+  }
+  /* Turns spent, summed over lives: the clock restarts when a life does. */
+  r._turnsBy = new Array(n);
+  const lives = new Map();
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const life = r.steps.life[i], was = lives.get(life) || 0;
+    if (r.steps.turns[i] > was) { total += r.steps.turns[i] - was; lives.set(life, r.steps.turns[i]); }
+    r._turnsBy[i] = total;
+  }
+}
 
 function pick(i) {
-  run = RUNS[i]; at = 0;
-  document.querySelectorAll("#matrix tr").forEach((tr, n) =>
-    tr.classList.toggle("on", n === i + 1));
-  $("slider").max = run.steps.length - 1;
-  $("run-title").textContent = `${run.label} — ${run.role || "?"}`;
-  $("run-hint").textContent =
-    `${run.blind ? "blind" : "named"} · seed ${run.seed} · ${run.steps.length - 1}` +
-    ` of ${run.budget} keys · best life ${run.best} · dlvl ${run.depth}`;
-  paint();
-}
-
-function build() {
-  const head = ["run", "character", "keys", "turns", "best life", "dlvl", "xp",
-                "lives", "wasted keys"];
-  const rows = [`<tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr>`];
-  RUNS.forEach((r, i) => rows.push(
-    `<tr data-i="${i}"><td>${r.label}</td><td>${esc(r.role)}</td>` +
-    `<td>${r.steps.length - 1}</td><td>${r.turns}</td><td>${r.best}</td>` +
-    `<td>${r.depth}</td><td>${r.xplevel}</td><td>${r.lives}</td>` +
-    `<td>${r.wasted}</td></tr>`));
-  $("matrix").innerHTML = rows.join("");
-  $("picker-hint").textContent = `${RUNS.length} run${RUNS.length === 1 ? "" : "s"}`;
+  stop();
+  run = DATA.runs[i];
+  index(run);
   document.querySelectorAll("#matrix tr[data-i]").forEach((tr) =>
-    tr.onclick = () => pick(+tr.dataset.i));
-  pick(0);
+    tr.classList.toggle("on", +tr.dataset.i === i));
+  el("slider").max = String(run.steps.n.length - 1);
+  el("run-title").textContent = `${run.label} — ${run.role || "?"}`;
+  const clean = !Object.keys((run.audit || {}).findings || {}).length;
+  el("run-hint").textContent =
+    `${run.blind ? "blind" : "named"} · seed ${run.seed} · ` +
+    `${comma(run.used)} of ${comma(run.budget)} keys · ${comma(run.turns)} turns · ` +
+    `best life ${comma(run.best)} · dlvl ${run.depth} · ` +
+    `progression ${(run.progression || {}).best ?? "—"}% · ` +
+    (run.audit && Object.keys(run.audit).length
+      ? `audit ${clean ? "clean" : "FLAGGED"}` : "audit pending");
+  el("hand-key").hidden = !run.handovers.length;
+  el("notes").innerHTML = (run.notes
+    ? `<pre class="code">${esc(run.notes)}</pre>`
+    : `<p class="empty">This session has left no notes.md yet.</p>`) +
+    (run.files.length
+      ? `<div class="files">it also wrote ${run.files.map(esc).join(", ")}</div>` : "");
+  buildBaselines();
+  buildBoard();
+  show(0);
+  requestAnimationFrame(() => { drawTrack(); drawChart(); });
 }
 
-function step(by) {
-  at = Math.max(0, Math.min(run.steps.length - 1, at + by));
-  paint();
+function buildMatrix() {
+  const head = ["run", "character", "keys", "turns", "turns/key", "best life",
+                "mean", "prog", "dlvl", "xp", "lives", "wasted", "sessions", "cost"];
+  const rows = [`<tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr>`];
+  DATA.runs.forEach((r, i) => {
+    const ended = r.scores.filter((s, k) => k < r.lives - 1);
+    const mean = ended.length
+      ? Math.round(ended.reduce((a, b) => a + b, 0) / ended.length) : 0;
+    const clean = !Object.keys((r.audit || {}).findings || {}).length;
+    rows.push(
+      `<tr data-i="${i}" title="workspace ${esc(r.label)}">` +
+      `<td><span class="dot ${clean ? "" : "critical"}"></span>${esc(r.label)}</td>` +
+      `<td>${esc(r.role)}</td><td>${comma(r.used)}</td><td>${comma(r.turns)}</td>` +
+      `<td>${(r.turns / Math.max(1, r.used)).toFixed(2)}</td>` +
+      `<td>${comma(r.best)}</td><td>${comma(mean)}</td>` +
+      `<td>${(r.progression || {}).best != null ? r.progression.best + "%" : "—"}</td>` +
+      `<td>${r.depth}</td><td>${r.xplevel}</td><td>${r.lives}</td>` +
+      `<td>${comma(r.wasted)}</td>` +
+      `<td>${r.handovers.length + 1}</td>` +
+      `<td>${r.agent.cost_usd != null ? "$" + r.agent.cost_usd.toFixed(2) : "—"}</td></tr>`);
+  });
+  el("matrix").innerHTML = rows.join("");
+  el("picker-hint").textContent =
+    `${plural(DATA.runs.length, "run")} · launch ${DATA.launch} · built ${DATA.built}`;
+  document.querySelectorAll("#matrix tr[data-i]").forEach((tr) =>
+    tr.addEventListener("click", () => pick(+tr.dataset.i)));
 }
-$("back").onclick = () => step(-1);
-$("fwd").onclick = () => step(1);
-$("slider").oninput = (e) => { at = +e.target.value; paint(); };
-$("play").onclick = () => {
-  if (timer) { clearInterval(timer); timer = null; $("play").textContent = "▶ play"; return; }
-  $("play").textContent = "❚❚ pause";
-  timer = setInterval(() => {
-    if (at >= run.steps.length - 1) { clearInterval(timer); timer = null;
-                                      $("play").textContent = "▶ play"; return; }
-    step(1);
-  }, 90);
-};
-document.onkeydown = (e) => {
-  if (e.key === "ArrowLeft") step(e.shiftKey ? -10 : -1);
-  if (e.key === "ArrowRight") step(e.shiftKey ? 10 : 1);
-};
-build();
+
+/* ── wiring ─────────────────────────────────────────────────────────────── */
+el("slider").addEventListener("input", (e) => { stop(); show(+e.target.value); });
+el("prev").addEventListener("click", () => { stop(); show(at - 1); });
+el("next").addEventListener("click", () => { stop(); show(at + 1); });
+el("prev-batch").addEventListener("click", () => { stop(); jumpBatch(-1); });
+el("next-batch").addEventListener("click", () => { stop(); jumpBatch(1); });
+el("next-mark").addEventListener("click", () => { stop(); jumpMark(1); });
+el("play").addEventListener("click", toggle);
+el("expand-all").addEventListener("click", () => {
+  wideOpen = !wideOpen;
+  el("expand-all").textContent = wideOpen ? "hide all" : "show all";
+  renderWork();
+});
+for (const [id, mode] of [["ax-turns", "turns"], ["ax-keys", "keys"]]) {
+  el(id).addEventListener("click", () => {
+    axis = mode;
+    el("ax-turns").classList.toggle("on", mode === "turns");
+    el("ax-keys").classList.toggle("on", mode === "keys");
+    drawChart(); buildLegend();
+  });
+}
+for (const [id, mode] of [["y-score", "score"], ["y-prog", "prog"]]) {
+  el(id).addEventListener("click", () => {
+    yaxis = mode;
+    el("y-score").classList.toggle("on", mode === "score");
+    el("y-prog").classList.toggle("on", mode === "prog");
+    drawChart(); buildLegend();
+  });
+}
+/* The population toggles. Each one hides a cloud that is already there rather
+   than fetching anything, so a click is a redraw and nothing more. A toggle for
+   a population this disk does not have is disabled, not hidden: the absence is
+   part of what the page is reporting. */
+for (const [id, key] of [["cl-nao", "nao"], ["cl-bot", "bot"], ["cl-agents", "agents"]]) {
+  const has = key === "nao" ? naoCloud().length
+    : key === "bot" ? (DATA.compare.autoascend.games || []).length
+      : (DATA.compare.agents || []).length;
+  if (!has) {
+    drawn[key] = false;
+    el(id).disabled = true;
+    el(id).classList.remove("on");
+    el(id).title = "not on this disk";
+    continue;
+  }
+  el(id).addEventListener("click", () => {
+    drawn[key] = !drawn[key];
+    el(id).classList.toggle("on", drawn[key]);
+    drawChart(); buildLegend();
+  });
+}
+addEventListener("resize", () => { drawTrack(); drawChart(); });
+document.addEventListener("keydown", (e) => {
+  if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName) && e.target.type !== "range") return;
+  const go = { ArrowLeft: -1, ArrowRight: 1 }[e.key];
+  if (go !== undefined) {
+    e.preventDefault(); stop();
+    if (e.shiftKey) jumpBatch(go); else show(at + go);
+  } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault(); stop(); jumpMark(e.key === "ArrowDown" ? 1 : -1);
+  } else if (e.key === " ") { e.preventDefault(); toggle(); }
+  else if (e.key === "Home") { stop(); show(0); }
+  else if (e.key === "End") { stop(); show(run.steps.n.length - 1); }
+});
+
+el("live").hidden = !DATA.live;
+el("footer").innerHTML = `
+  <p><b>What is on this page.</b> Launch ${esc(DATA.launch)}, rebuilt ${esc(DATA.built)}.
+  Every screen here is one the session was given: 24 rows of 80 characters, in
+  NetHack's own sixteen colours, and nothing else. An action is one keystroke — there
+  are no renamed keys, no auto-dismissed <code>--More--</code>, and no skipped menus.</p>
+  <p><b>The screens are replayed, not read.</b> Nothing on disk holds the score at a
+  given key: the record is rewritten in place after every action. The keystroke history
+  plus the seeds <i>is</i> the run, so the page is built by playing that history back
+  through a fresh game, which is bit-exact. That is where the colours, the status line
+  and the meters come from, whatever channel the run was actually played on.</p>
+  <p><b>Reasoning.</b> The CLI returns its thinking blocks encrypted, so this page
+  cannot show what a session thought — only what it wrote down. That turns out to be
+  most of the story: to move at all it had to state a plan, and to play efficiently it
+  wrote scripts. Both are here, batch by batch.</p>
+  <p><b>What "off the board" means.</b> Keys are played in batches, and between two of
+  them a session can run as much as it likes for free — scripts that parse the screen,
+  map the level, plan a route. The panel under the terminal is that work, for the batch
+  you are looking at.</p>
+  <p><b>Progression.</b> NetHack's own score says how a game went, not how far
+  through it got — a winning game can score anywhere from a few hundred thousand to
+  several million. So the page also carries BALROG's ladder, built from human games,
+  where each rung is the probability a human went on to ascend having reached that
+  dungeon or experience level. Level 1 is 0%, ascension is 100%, and a run is credited
+  with the higher of its two rungs. Both rungs are shown beside the board, because the
+  higher one alone reads a character who dug past everything as half way to a win.</p>
+  <p><b>Wasted keys.</b> A <code>--More--</code> swallows every key that is not
+  <code>cr</code>, <code>esc</code> or <code>space</code>, silently. Those keys cost
+  budget and changed nothing, and the amber ticks under the track are where they went.</p>`;
+
+buildMatrix();
+pick(0);
 </script>

@@ -138,3 +138,48 @@ def test_the_curve_reports_the_best_life_and_not_a_total(played):
     assert mark["best_life"] == 40, "the curve summed the lives"
     assert mark["turns"] == 12, "the clock was carried across a life"
     assert mark["lives"] == 2 and mark["depth"] == 2 and mark["xplevel"] == 2
+
+
+def test_the_curve_carries_the_rung_beside_the_score(played):
+    """The two answer different questions, which is why both are in the table: a
+    score says how a game went and a rung says how far through it got."""
+    rows = [
+        {"life": 0, "score": 10, "turns": 5, "depth": 1, "xplevel": 1},
+        {"life": 0, "score": 40, "turns": 9, "depth": 12, "xplevel": 1},
+    ]
+    rows = [dict(row, action=i, key="l", reward=0, moved=True, prompt="", wasted=False,
+                 ended="") for i, row in enumerate(rows, start=1)]
+    monkeyed = readout.MILESTONES
+    readout.MILESTONES = (1, 2)
+    try:
+        marks = readout.curve(rows)
+    finally:
+        readout.MILESTONES = monkeyed
+    from progression import progression
+
+    assert marks[0]["progression"] == 0.0, "dungeon level 1 is the start, not progress"
+    assert marks[1]["progression"] == round(progression(12, 1), 2)
+    assert marks[1]["progression"] > marks[0]["progression"]
+
+
+def test_the_pair_quoted_is_a_pair_one_life_actually_had(played):
+    """The max over lives cannot differ from the max over the run — a maximum
+    distributes — so the number is safe either way. The *pair* is not: a run whose
+    first life dug to level 29 and whose second levelled to 20 never had a character
+    that was both, and reporting `dlvl 29, xp 20` would invent one."""
+    from progression import of_lives, rungs
+
+    got = of_lives([{"depth": 29, "xp": 1}, {"depth": 1, "xp": 20}])
+    assert (got["depth"], got["xp"]) == (1, 20), "it stitched two lives into one"
+    assert got["best"] == round(max(rungs(1, 20)), 2)
+    assert got["xp_rung"] > got["depth_rung"], "experience is carrying this one"
+
+
+def test_a_run_carries_its_lives_and_its_rungs(played):
+    one = readout.read(*played(["l", "l", "j", "#quit", "y", "l"]))
+    assert [life["life"] for life in one["lives"]] == [0, 1]
+    got = one["progression"]
+    assert got["first"] == got["per_life"][0]
+    assert got["best"] == max(got["per_life"])
+    # Both rungs, always: the higher one alone is what hides an unbalanced run.
+    assert got["best"] == max(got["depth_rung"], got["xp_rung"])
