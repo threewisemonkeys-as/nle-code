@@ -33,6 +33,7 @@ import asyncio
 import json
 import os
 import secrets
+import shutil
 import sys
 import time
 from datetime import UTC, datetime
@@ -46,7 +47,7 @@ REPO = Path(__file__).resolve().parent
 # rig/ is not a package, so that a sandbox can overwrite any of it between builds.
 sys.path.insert(0, str(REPO / "rig"))
 
-from agents import AGENTS  # noqa: E402
+from agents import AGENTS, HARVESTED  # noqa: E402
 from audit import Audit, audit_session  # noqa: E402
 
 from act import DEFAULT_BUDGET, RESULT  # noqa: E402
@@ -63,6 +64,10 @@ RUNS = Path(os.environ.get("NLE_RUNS") or Path.home() / "agent-runs")
 # deliberately not the package — `from nle import nethack` reaches the glyph table
 # and a second copy of the game. Built by tools/make_agent_venv.sh.
 AGENT_PYTHON = REPO / ".agent-venv" / "bin" / "python"
+# The filesystem fence, applied to a session's own process before its CLI starts.
+# See `fenced_argv` below and rig/fence.py for what it is and why only one arm has
+# one.
+FENCE = REPO / "rig" / "fence.py"
 
 # The longest a chain will wait between sessions that played nothing. An hour is
 # the shape of the thing being waited out — an exhausted rate window — and waiting
@@ -136,6 +141,10 @@ class Report(BaseModel):
     audit: Audit = Audit()
     turns: int = 0
     tool_calls: int = 0
+    # Whether the sessions ran inside the filesystem fence — see `fenced_argv`. Only
+    # one arm has one, so this is the field that keeps the two arms' scores from
+    # being read as if they were measured the same way.
+    fenced: bool = False
     # How many agent sessions played this run. More than one means it was stinted:
     # every counter above is the sum over all of them, and every score below is the
     # run's, because the run is the thing they were all playing.
@@ -193,11 +202,15 @@ def child_env(api_key: str | None) -> dict[str, str]:
     The parent's CLAUDE_* variables identify *this* session; inheriting them would
     make the child a continuation of it rather than a session of its own, and would
     bill it accordingly. (arc-code, run.py)
+
+    CODEX_* for the same reason and one more: CODEX_HOME is how a session is given a
+    configuration directory of its own, and a value inherited from whoever launched
+    the run would put every session back in the operator's.
     """
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_"))
+        if not k.startswith(("CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_", "CODEX_"))
     }
     env.pop("ANT_API_KEY", None)
     if api_key:
@@ -369,14 +382,19 @@ def credential_life(path: Path) -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def session_config(root: Path, label: str) -> Path:
+def session_config(root: Path, label: str, agent=None) -> Path:
     """A config directory of this session's own, seeded with the CLI's credential.
 
     The CLI keeps its sessions and its memory of a project under its config
     directory, which by default is the operator's ``~/.claude`` — where the
-    operator's own notes on this very harness live. A session is told about its
-    memory directory, so listing the parent is a short walk to a sibling project's
-    notes; pointing the whole tree somewhere else removes that walk.
+    operator's own notes on this very harness live — or ``~/.codex``, which holds the
+    same kind of thing under different names: a prompt history, a memories store and
+    a log of every session the operator has run. A session is told about its memory
+    directory, so listing the parent is a short walk to a sibling project's notes;
+    pointing the whole tree somewhere else removes that walk.
+
+    Which directory, which credential file and which of two copies is the fresher are
+    the CLI's business and live in its adapter. Everything below is the same for both.
 
     Mitigation and not prevention: an absolute path still reaches the real one, and
     until a sandbox exists only the audit stands there.
@@ -399,19 +417,103 @@ def session_config(root: Path, label: str) -> Path:
     after inherits the refreshed copy — for as long as the refresh token lives, which
     is about a month rather than about eight hours.
     """
-    config = root / ".sessions" / label / ".claude"
+    agent = agent or AGENTS["claude"]
+    config = root / ".sessions" / label / agent.CONFIG_DIR
     config.mkdir(parents=True, exist_ok=True)
-    credential = Path.home() / ".claude" / ".credentials.json"
-    link = config / ".credentials.json"
+    credential = Path.home() / agent.CONFIG_DIR / agent.CREDENTIAL
+    link = config / agent.CREDENTIAL
     if not credential.exists():
         return config
     if link.is_symlink() and link.resolve() == credential.resolve():
         return config
-    if credential_life(link)[0] > credential_life(credential)[0]:
+    if agent.freshness(link) > agent.freshness(credential):
         return config
     link.unlink(missing_ok=True)
     link.symlink_to(credential)
     return config
+
+
+def site_packages(venv: Path) -> Path:
+    """Where a virtual environment keeps what was installed into it."""
+    for found in sorted(venv.glob("lib/python*/site-packages")):
+        return found
+    raise SystemExit(f"run: {venv} has no site-packages — is it built?")
+
+
+def fenced_argv(agent, argv: list[str], ws: Path, home: Path) -> list[str]:
+    """`argv`, wrapped in the only filesystem the session will be able to see.
+
+    The fence itself is rig/fence.py, ported unchanged from cc_craftax; this is the
+    allowlist, and the allowlist is the whole design. What it exists to close is the
+    package: `nle` ships the whole of NetHack — a second copy of the game to try
+    moves in for nothing, and `nethackdir`'s object, monster and dungeon tables —
+    and this harness beside it carries floors that play the game and populations that
+    say how far people got. A session that reaches either is not playing what it was
+    handed. The Codex arm reached for the equivalent on cc_craftax in its first smoke
+    run, which is why it is fenced here before it has had the chance.
+
+    Only the Codex arm is fenced, which is an asymmetry and is recorded as one:
+    `Report.fenced` says which side of it a run was on. The Claude arm's M6 pass had
+    the same reach and never used it, so fencing it now would change a result rather
+    than protect one.
+
+    Three kinds of grant, and the difference between them matters:
+
+    * **read** — the system, the two interpreters, the CLI's own binary, the
+      launch's `.bin` (the neutral names the workspace's shims are written in, F18),
+      and the credential, granted by name because the copy in `home` is a symlink to
+      it and Landlock checks where a symlink lands.
+    * **write** — the workspace, this session's config directory, and the temporary
+      directories every CLI assumes.
+    * **list** — the harness's own directory and the interpreter's `site-packages`,
+      whose *names* are readable and whose contents are not. Python lists the
+      directory a script sits in to find the module beside it — `.bin/actuator.py`
+      is a symlink, and Python resolves it before deciding what is on `sys.path` —
+      so `./act` cannot run without this; with it, everything in this repository
+      except the two files `./act` is made of stays shut, `tools/` among them.
+
+    The package is closed by never being named: rules only ever widen a hierarchy,
+    so `site-packages` is passed as its contents minus the entries that are the game.
+    That is cheap here for the reason it was on cc_craftax — `import act` loads no
+    module of the package, its imports being function-local in `nle_game.py` — and
+    the fence depends on that staying true.
+    """
+    binary = shutil.which(argv[0])
+    if not binary:
+        raise SystemExit(f"run: {argv[0]} is not on PATH — there is nothing to fence")
+    # Not the binary's directory but the release it was installed as: this CLI ships
+    # tools of its own — `rg` among them — in a sibling of its `bin`, and a session
+    # that loses them has lost a capability the unfenced arm keeps. The fence is
+    # meant to take away the game's second copy, not the tools.
+    shipped = Path(binary).resolve().parent
+    shipped = shipped.parent if shipped.name == "bin" else shipped
+    site = site_packages(REPO / ".env-venv")
+    credential = Path.home() / agent.CONFIG_DIR / agent.CREDENTIAL
+    read = [
+        Path("/usr"),
+        Path("/etc"),
+        Path("/proc"),
+        Path("/sys"),
+        # /etc/resolv.conf is a symlink into here on this machine, and a session
+        # that cannot resolve a name cannot reach its own API.
+        Path("/run/systemd/resolve"),
+        Path(sys.base_prefix),  # the real interpreter behind both venvs, and its stdlib
+        shipped,  # the CLI's own binary and the tools it ships beside it
+        REPO / "act.py",  # the two files the workspace's `act` shim runs
+        REPO / "nle_game.py",
+        REPO / ".env-venv" / "bin",
+        REPO / ".env-venv" / "pyvenv.cfg",
+        AGENT_PYTHON.parents[1],  # the agent's own interpreter, which has no package
+        bin_dir(ws.parent),  # what the shims exec, under names that say nothing
+        *(p for p in site.iterdir() if not p.name.startswith("nle")),
+        *([credential] if credential.exists() else []),
+    ]
+    write = [ws, home, Path("/tmp"), Path("/var/tmp"), Path("/dev")]
+    listed = [REPO, site]
+    flags: list[str] = []
+    for flag, paths in (("--ro", read), ("--rw", write), ("--ls", listed)):
+        flags += [arg for path in paths for arg in (flag, str(path))]
+    return [sys.executable, str(FENCE), *flags, "--", *argv]
 
 
 async def act(ws: Path, *args: str) -> str:
@@ -542,6 +644,52 @@ async def one_session(
     return stderr, proc.returncode or 0
 
 
+def harvested_since(ws: Path) -> float:
+    """The newest harvested item already folded into this run's stream.
+
+    Read back out of the stream rather than kept in memory, because a run outlives
+    the process that started it: a `--continue` picks up a workspace whose stream
+    already holds every item the earlier launch harvested, and a watermark starting
+    at zero would append all of them a second time and count them twice.
+    """
+    path = ws / "agent_stream.jsonl"
+    if not path.exists():
+        return 0.0
+    best = 0.0
+    # A line at a time, and the cheap test first. This file runs to hundreds of
+    # megabytes on a long run and all but a handful of its lines are not this, so
+    # reading it whole to find them would cost more memory than the run it resumes.
+    with path.open(errors="replace") as stream:
+        for line in stream:
+            if HARVESTED not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == HARVESTED:
+                best = max(best, float(event.get("at", 0)))
+    return best
+
+
+def harvest(agent, home: Path, ws: Path, report: "Report", since: float) -> float:
+    """Fold what the CLI recorded but did not stream into the session's stream.
+
+    Appended after the session that produced it has ended, because that is when the
+    CLI's own record is complete and no longer being written to. The events carry
+    their own type, so the stream stays honest about which of its lines came off a
+    stdout and which were read back out of a database afterwards.
+    """
+    events = agent.harvest(home, since)
+    if not events:
+        return since
+    with (ws / "agent_stream.jsonl").open("a", buffering=1) as stream:
+        for event in events:
+            stream.write(json.dumps(event) + "\n")
+            agent.absorb(report, event)
+    return max(float(event.get("at", since)) for event in events)
+
+
 async def play(
     label: str,
     spec: tuple[str, int],
@@ -575,10 +723,11 @@ async def play(
         # disagreed with the run would be the only place the two differed.
         channels = (list(json.loads((ws / "state.json").read_text())["obs"])
                     if how == "resume" else list(args.obs))
+        agent = AGENTS[args.agent]
         report = Report(label=label, variant=variant, seed=seed, obs=channels,
                         opening=args.opening, workspace=str(ws), agent=args.agent,
-                        model=args.model, budget=budget)
-        agent = AGENTS[args.agent]
+                        model=args.model, budget=budget,
+                        fenced=agent.FENCED and not args.no_fence)
 
         def briefed(n: int) -> str:
             """What session `n` is told it is walking into.
@@ -635,17 +784,28 @@ async def play(
             # actions, because the only thing that grants a stint is a launcher
             # starting the daemon; and every handover is a clean process, which over
             # twenty hours matters more than the minutes it costs.
+            watermark = harvested_since(ws)
             for n in count(1):
                 before = played(ws)
+                turns_before, calls_before = report.turns, report.tool_calls
                 await act(ws, *opened(n))
                 argv = agent.argv(briefed(n), args.model, ws)
                 # Re-seeded per session and not per run: the CLI replaces the
                 # symlink with a copy of whatever the credential was when it last
                 # refreshed a token, and a chain of sessions can outlive that by
                 # many hours (F13).
-                session_env = env | {"CLAUDE_CONFIG_DIR": str(session_config(root, label))}
+                home = session_config(root, label, agent)
+                session_env = env | {agent.CONFIG_ENV: str(home)}
+                # After the config directory exists, because the fence has to grant
+                # it: a session cannot be given a home it may not write to.
+                if report.fenced:
+                    argv = fenced_argv(agent, argv, ws, home)
                 stderr, report.exit_code = await one_session(
                     argv, ws, session_env, report, agent)
+                # Before anything reads the stream, and inside the loop rather than
+                # after it: a chain's sessions share one record, and each has to be
+                # taken while it is the newest thing in it.
+                watermark = harvest(agent, home, ws, report, watermark)
                 report.sessions = n
                 if report.exit_code:
                     # Not fatal to the run. The actions it played are recorded and
@@ -653,6 +813,15 @@ async def play(
                     # whatever it had not written down.
                     print(f"[{label}] session {n} exited {report.exit_code}: "
                           f"{' '.join(stderr.split())[-200:]}", flush=True)
+                # Why a session played nothing, when the adapter can tell from the
+                # shape of its stream. Here rather than in the retry branch below,
+                # which a run without a stint never reaches: a first smoke run is
+                # exactly where this diagnosis is worth the most.
+                if played(ws) <= before:
+                    why = getattr(agent, "no_commands", lambda *_: "")(
+                        report.turns - turns_before, report.tool_calls - calls_before)
+                    if why:
+                        print(f"[{label}] session {n} {why}", flush=True)
 
                 state = json.loads((ws / "state.json").read_text())
                 if state["terminal"]:
@@ -750,7 +919,8 @@ async def play(
         if report.unapproved_tools:
             print(
                 f"[{label}] registered but not approved: "
-                f"{', '.join(report.unapproved_tools)} — extend Claude.DENIED",
+                f"{', '.join(report.unapproved_tools)} — extend "
+                f"{type(agent).__name__}.DENIED",
                 flush=True,
             )
         if report.audit.named_the_game:
@@ -933,6 +1103,11 @@ async def main() -> int:
                         help="roll a new character and dungeon on each life instead "
                              "of dealing this one again")
     parser.add_argument("--agent", default="claude", choices=sorted(AGENTS))
+    parser.add_argument(
+        "--no-fence", action="store_true",
+        help="run an agent that is normally fenced with the whole disk instead. "
+             "For finding out what a session reaches for; not for a measured run",
+    )
     parser.add_argument("--model", help="model for the agent sessions (default: the agent's own)")
     parser.add_argument("-c", "--concurrency", type=int, default=4, help="games at once")
     parser.add_argument(
@@ -974,6 +1149,31 @@ async def main() -> int:
                   f"refresh token {(refresh - now) / 86400:.1f} days. Sessions "
                   f"refresh their own, so the refresh token is the one that has to "
                   f"outlast the run.", flush=True)
+    if args.agent == "codex":
+        # This CLI has no per-request key to hand a session: it signs in once and
+        # every session inherits a copy of that login. So there is one thing to check
+        # and one thing to say about the number it will produce.
+        agent = AGENTS["codex"]
+        auth = Path.home() / agent.CONFIG_DIR / agent.CREDENTIAL
+        if not agent.freshness(auth):
+            print(f"run: no usable codex login at {auth} — every session will fail "
+                  f"to authenticate. Run `codex login` before starting.", flush=True)
+        else:
+            print(f"run: codex login last refreshed "
+                  f"{(time.time() - agent.freshness(auth)) / 3600:.1f}h ago. Sessions "
+                  f"inherit a copy and refresh their own; the cost column is computed "
+                  f"from this model's published prices, not reported by the CLI.",
+                  flush=True)
+        # Said out loud because it is the asymmetry between the two arms, and a run
+        # whose log does not mention it is a run somebody will later compare to the
+        # Claude pass without knowing.
+        if agent.FENCED and not args.no_fence:
+            print("run: sessions are fenced to their workspace — the package and "
+                  "this harness are unreadable to them. The Claude arm is not "
+                  "fenced; see fenced_argv.", flush=True)
+        else:
+            print("run: --no-fence — sessions can read the package and this "
+                  "harness, which the audit will record as a finding.", flush=True)
 
     if args.replay and args.carry_on:
         raise SystemExit(

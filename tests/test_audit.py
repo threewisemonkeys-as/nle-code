@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "rig"))
 
+from agents import AGENTS, HARVESTED  # noqa: E402
 from audit import grade  # noqa: E402
 
 
@@ -157,3 +158,79 @@ def test_another_launch_is_still_reaching():
     assert not other.clean and "the record" in other.findings
     mine = grade(ran(f"cat {root}/.rig/labels.json"), own="SUAUK", root=root)
     assert not mine.clean and "the record" in mine.findings
+
+
+# --------------------------------------------------------------------------- #
+# The other CLI
+# --------------------------------------------------------------------------- #
+
+
+def codex_ran(*commands: str) -> list[str]:
+    """A stream in which a Codex session ran these commands."""
+    return [
+        json.dumps({"type": "item.completed",
+                    "item": {"type": "command_execution", "command": c}})
+        for c in commands
+    ]
+
+
+def codex_saw(*paths: str) -> list[str]:
+    """A stream in which a Codex session opened these files as pictures.
+
+    Shaped as the launcher's harvest writes them, because that is the only place
+    they appear: the CLI's own stdout carries no event for looking at an image.
+    """
+    return [
+        json.dumps({"type": HARVESTED,
+                    "item": {"type": "imageView", "path": p}})
+        for p in paths
+    ]
+
+
+def test_the_other_clis_notes_are_somebody_elses_too():
+    """~/.codex holds what ~/.claude holds under different names, and more of it: the
+    operator's prompt history, what the CLI remembered across sessions, and the
+    transcript of every session they have ever run."""
+    for path in ("~/.codex/history.jsonl", "~/.codex/memories", "~/.codex/sessions",
+                 "~/.codex/thread_history_1.sqlite", "~/.codex/logs_2.sqlite"):
+        audit = grade(codex_ran(f"cat {path}"), agent=AGENTS["codex"])
+        assert "another session's notes" in audit.findings, path
+
+
+def test_a_session_reading_its_own_memory_is_doing_what_it_was_told():
+    """The launcher points the session's config directory *at* one of the paths the
+    rule above catches, precisely so it is not the operator's. Keyed to the wrong
+    CLI, the scrub would have failed a Codex session on every line that named its own
+    notes — so the directory comes from the adapter rather than a constant."""
+    codex = AGENTS["codex"]
+    own = "/runs/20260922/.sessions/ZJLJX/.codex/history.jsonl"
+    assert grade(codex_ran(f"cat {own}"), agent=codex, own="ZJLJX").clean
+    theirs = grade(codex_ran("cat /home/me/.codex/history.jsonl"),
+                   agent=codex, own="ZJLJX")
+    assert "another session's notes" in theirs.findings
+
+
+def test_a_file_opened_as_a_picture_is_audited():
+    """The hole harvesting exists to close. This CLI streams no event for its image
+    tool, so before the harvest a session could open anything readable as an image
+    and the audit — which is a claim about everything a session reached — would never
+    have seen the reach. A picture of the map is not a finding; the game's data is."""
+    codex = AGENTS["codex"]
+    clean = grade(codex_saw("/runs/20260922/ZJLJX/frames/000001.png"),
+                  agent=codex, own="ZJLJX", root="/runs/20260922")
+    assert clean.clean and clean.frames_in_context == 1
+
+    reached = grade(codex_saw("/venv/lib/python3.12/site-packages/nle/nethackdir/nhdat"),
+                    agent=codex, own="ZJLJX")
+    assert "the game's data" in reached.findings
+
+    sibling = grade(codex_saw("/runs/20260922/K7M3Q/frames/000001.png"),
+                    agent=codex, own="ZJLJX", siblings=["ZJLJX", "K7M3Q"],
+                    root="/runs/20260922")
+    assert "another session's workspace" in sibling.findings
+
+
+def test_a_codex_command_that_reaches_is_caught_like_a_claude_one():
+    """The table is over what was run, not over which CLI ran it."""
+    audit = grade(codex_ran("python -m nle.scripts.play"), agent=AGENTS["codex"])
+    assert "a second game" in audit.findings

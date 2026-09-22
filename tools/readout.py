@@ -27,12 +27,16 @@ what it cost.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "rig"))
+
+from agents import AGENTS, HARVESTED, priced  # noqa: E402
 
 from nle_game import NleGame  # noqa: E402
 from progression import BOARD, BOARD_MEDIAN, of_lives, progression  # noqa: E402
@@ -181,14 +185,121 @@ def longest_stuck(rows: list[dict]) -> int:
     return worst
 
 
+def whose(lines: list[str]) -> str:
+    """Which CLI wrote this stream, from the first event that names its own shape.
+
+    Sniffed rather than passed in, because this reads a file and the answer is in the
+    file. A readout that took the agent from the launch's report would be reading one
+    of them and grading the other whenever a report was missing — and a report is
+    only written when a launch finishes, so on a run that is still playing it always
+    is. (cc_craftax found this the way it matters: a live Codex page with no moments.)
+    """
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type", "")
+        if kind.startswith(("thread.", "turn.", "item.")) or kind == HARVESTED:
+            return "codex"
+        if kind in ("system", "assistant", "user", "result"):
+            return "claude"
+    return "claude"
+
+
+def model_of(ws: Path, cli: str = "") -> str:
+    """Which model played this workspace, from the first record that says.
+
+    The launch's report says, once the launch is over. Before that the CLI's own
+    records do: Codex writes the model into every session it keeps under the
+    config directory the launcher gave it, and Claude names it in the stream's
+    `init` event. The adapter's default is the last resort and is only a guess.
+    """
+    report = ws.parent / ".rig" / "reports" / f"{ws.name}.json"
+    try:
+        if found := json.loads(report.read_text()).get("model"):
+            return str(found)
+    except (OSError, ValueError, AttributeError):
+        pass
+    kept = ws.parent / ".sessions" / ws.name / ".codex" / "sessions"
+    for rollout in sorted(kept.glob("*/*/*/rollout-*.jsonl")):
+        with rollout.open(errors="replace") as lines:
+            for line in lines:
+                if found := re.search(r'"model":"([^"]+)"', line):
+                    return found[1]
+    stream = ws / "agent_stream.jsonl"
+    if stream.exists():
+        with stream.open(errors="replace") as lines:
+            for line in lines:
+                if '"subtype":"init"' in line.replace(" ", ""):
+                    try:
+                        return str(json.loads(line).get("model") or "")
+                    except json.JSONDecodeError:
+                        break
+    return AGENTS[cli].model if cli in AGENTS else ""
+
+
+def codex_agent(lines: list[str], model: str) -> dict:
+    """`agent`, for a stream Codex wrote — which shares almost nothing with Claude's.
+
+    A session is a `thread.started`; its messages stand in for turns, as they do in
+    the launcher's adapter; a tool call is a command, or a picture the launcher
+    harvested back out of the CLI's own history. Usage arrives once per session and
+    is summed. Cost is not in the stream in any form: it is priced from the model's
+    published rates, the same arithmetic as the report, and is zero when unknown.
+    """
+    turns = calls = sessions = 0
+    cost = 0.0
+    cached = output = 0
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind, item = event.get("type"), event.get("item", {}) or {}
+        if kind == "thread.started":
+            sessions += 1
+        elif kind == "item.completed" and item.get("type") == "agent_message":
+            turns += 1
+        elif kind == "item.completed" and item.get("type") == "command_execution":
+            calls += 1
+        elif kind == HARVESTED and item.get("type") == "imageView":
+            calls += 1
+        elif kind == "turn.completed":
+            usage = event.get("usage") or {}
+            spent = {
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "cache_read_tokens": usage.get("cached_input_tokens", 0),
+                "cache_creation_tokens": usage.get("cache_write_input_tokens", 0),
+            }
+            cost += priced(model, **spent)
+            cached += spent["cache_read_tokens"]
+            output += spent["output_tokens"]
+    return {
+        "cli": "codex",
+        "model": model,
+        "turns": turns,
+        "tool_calls": calls,
+        "sessions": sessions,
+        "compactions": 0,
+        "cost_usd": round(cost, 2),
+        "cache_read_tokens": cached,
+        "output_tokens": output,
+    }
+
+
 def agent(stream: Path) -> dict:
     """What the session cost and how hard it batched, from its own event stream."""
     if not stream.exists():
         return {}
+    lines = stream.read_text(errors="replace").splitlines()
+    if whose(lines) == "codex":
+        return codex_agent(lines, model_of(stream.parent, "codex"))
     turns = calls = compactions = sessions = 0
     cost = 0.0
     usage: dict[str, int] = {}
-    for line in stream.read_text(errors="replace").splitlines():
+    for line in lines:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
@@ -209,6 +320,8 @@ def agent(stream: Path) -> dict:
             for key in ("cache_read_input_tokens", "output_tokens"):
                 usage[key] = usage.get(key, 0) + (event.get("usage") or {}).get(key, 0)
     return {
+        "cli": "claude",
+        "model": model_of(stream.parent, "claude"),
         "turns": turns,
         "tool_calls": calls,
         "sessions": sessions,

@@ -312,17 +312,48 @@ def read_log(path: Path) -> tuple[dict[int, str], list[dict]]:
 # The stream: what the session did between batches
 # --------------------------------------------------------------------------- #
 def moments(stream: Path, ws: Path) -> list[dict]:
-    """The session's turns, flattened into what it said, ran and was told back."""
+    """The session's turns, flattened into what it said, ran and was told back.
+
+    Either CLI's stream. Which one wrote it is read off the stream itself, because a
+    run that is still playing has no report to say — and read as Claude's, a Codex
+    stream yields no moments at all, which is a page with every batch unexplained.
+    """
     if not stream.exists():
         return []
+    from readout import HARVESTED, whose  # noqa: PLC0415
+
+    lines = stream.read_text(errors="replace").splitlines()
+    cli = whose(lines)
     out: list[dict] = []
     pending: dict[str, dict] = {}
-    for line in stream.read_text(errors="replace").splitlines():
+    for line in lines:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
         kind = event.get("type")
+        if cli == "codex":
+            item = event.get("item", {}) or {}
+            if kind == "item.completed" and item.get("type") == "agent_message":
+                out.append({"kind": "say", "text": str(item.get("text", ""))[:OUTPUT_CAP]})
+            elif kind == "item.completed" and item.get("type") == "command_execution":
+                out.append({
+                    "kind": "tool", "name": "Bash",
+                    "title": str(item.get("command", ""))[:COMMAND_CAP], "why": "",
+                    "body": "",
+                    # Kept whole for the cursor in `assign`, cut for the page after.
+                    "out": str(item.get("aggregated_output", "")),
+                    "error": bool(item.get("exit_code")),
+                })
+            elif kind == "item.completed" and item.get("type") in ("file_change",
+                                                                     "patch_apply"):
+                out.append({"kind": "tool", "name": "Edit", "title": "", "why": "",
+                            "body": str(item)[:OUTPUT_CAP], "out": ""})
+            elif kind == HARVESTED and item.get("type") == "imageView":
+                out.append({"kind": "tool", "name": "view_image", "why": "",
+                            "title": str(item.get("path", ""))[:COMMAND_CAP],
+                            "body": "", "out": ""})
+            continue
         if kind == "assistant":
             for block in event.get("message", {}).get("content", []) or []:
                 if not isinstance(block, dict):

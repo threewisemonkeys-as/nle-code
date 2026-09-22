@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import sqlite3
 import subprocess
 import time
 import sys
@@ -13,6 +14,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "rig"))
+
+from agents import AGENTS, HARVESTED, PRICES  # noqa: E402
 
 import run  # noqa: E402
 from nle_game import VARIANTS  # noqa: E402
@@ -352,7 +355,7 @@ def test_a_run_without_a_stint_is_one_session(tmp_path, monkeypatch):
     monkeypatch.setattr(run, "act", fake_act)
     monkeypatch.setattr(run, "one_session", fake_session)
     monkeypatch.setattr(run, "refresh_brief", lambda w, o: None)
-    monkeypatch.setattr(run, "session_config", lambda r, label: tmp_path / "cfg")
+    monkeypatch.setattr(run, "session_config", lambda r, label, agent=None: tmp_path / "cfg")
     monkeypatch.setattr(run, "audit_session", lambda *a, **k: run.Audit())
     (tmp_path / ".envs" / "W").mkdir(parents=True)
     (tmp_path / ".envs" / "W" / "result.json").write_text(json.dumps(
@@ -367,7 +370,7 @@ def test_a_run_without_a_stint_is_one_session(tmp_path, monkeypatch):
             "carry_on": str(tmp_path), "replay": None, "obs": ["tty"], "budget": 500,
             "stint": stint, "max_sessions": max_sessions, "fresh_world": False,
             "agent": "claude", "model": "m", "dry_run": False, "retries": retries,
-            "opening": "named", "idle_wait": 0,
+            "opening": "named", "idle_wait": 0, "no_fence": False,
         })()
         report = asyncio.run(run.play("W", ("nethack", 0), tmp_path, args, {}, ["W"],
                                       asyncio.Semaphore(1)))
@@ -472,7 +475,7 @@ def test_a_session_that_plays_nothing_is_retried_and_then_gives_up(tmp_path, mon
     monkeypatch.setattr(run, "act", fake_act)
     monkeypatch.setattr(run, "one_session", lambda *a: _nothing())
     monkeypatch.setattr(run, "refresh_brief", lambda w, o: None)
-    monkeypatch.setattr(run, "session_config", lambda r, label: tmp_path / "cfg")
+    monkeypatch.setattr(run, "session_config", lambda r, label, agent=None: tmp_path / "cfg")
     monkeypatch.setattr(run, "audit_session", lambda *a, **k: run.Audit())
     (tmp_path / ".envs" / "W").mkdir(parents=True)
     (tmp_path / ".envs" / "W" / "result.json").write_text(json.dumps(
@@ -485,7 +488,7 @@ def test_a_session_that_plays_nothing_is_retried_and_then_gives_up(tmp_path, mon
         "carry_on": str(tmp_path), "replay": None, "obs": ["tty"], "budget": 500,
         "stint": 10, "max_sessions": 20, "fresh_world": False, "agent": "claude",
         "model": "m", "dry_run": False, "retries": 2, "opening": "named",
-        "idle_wait": 0,
+        "idle_wait": 0, "no_fence": False,
     })()
     report = asyncio.run(run.play("W", ("nethack", 0), tmp_path, args, {}, ["W"],
                                   asyncio.Semaphore(1)))
@@ -516,7 +519,7 @@ def test_the_wait_between_idle_sessions_doubles_and_is_capped(tmp_path, monkeypa
     monkeypatch.setattr(run, "act", lambda where, *argv: _nothing_at_all())
     monkeypatch.setattr(run, "one_session", lambda *a: _nothing())
     monkeypatch.setattr(run, "refresh_brief", lambda w, o: None)
-    monkeypatch.setattr(run, "session_config", lambda r, label: tmp_path / "cfg")
+    monkeypatch.setattr(run, "session_config", lambda r, label, agent=None: tmp_path / "cfg")
     monkeypatch.setattr(run, "audit_session", lambda *a, **k: run.Audit())
     monkeypatch.setattr(run.asyncio, "sleep", no_wait)
     (tmp_path / ".envs" / "W").mkdir(parents=True)
@@ -532,7 +535,7 @@ def test_the_wait_between_idle_sessions_doubles_and_is_capped(tmp_path, monkeypa
             "carry_on": str(tmp_path), "replay": None, "obs": ["tty"], "budget": 500,
             "stint": 10, "max_sessions": 20, "fresh_world": False, "agent": "claude",
             "model": "m", "dry_run": False, "retries": retries, "opening": "named",
-            "idle_wait": idle_wait,
+            "idle_wait": idle_wait, "no_fence": False,
         })()
         report = asyncio.run(run.play("W", ("nethack", 0), tmp_path, args, {}, ["W"],
                                       asyncio.Semaphore(1)))
@@ -551,3 +554,285 @@ def test_the_wait_between_idle_sessions_doubles_and_is_capped(tmp_path, monkeypa
 
 async def _nothing_at_all():
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# The other CLI
+# --------------------------------------------------------------------------- #
+
+
+def test_codex_is_handed_the_same_workspace_and_a_narrower_machine():
+    """Two things at once, because they are the same requirement. The brief must be
+    the file both arms read, so that a workspace differs between them in nothing; and
+    what the session can reach beyond it must be narrowed by name, since this CLI has
+    no denylist to pass and ships a browser and agents of its own switched on. Here the
+    web matters more than anywhere: NetHack's wiki answers every question a run asks."""
+    codex = AGENTS["codex"]
+    argv = codex.argv("PLAY", codex.model, Path("/ws"))
+    flat = " ".join(argv)
+
+    assert 'project_doc_fallback_filenames=["CLAUDE.md"]' in argv, "reads AGENTS.md only"
+    assert "--ignore-user-config" in argv, "the operator's config would decide the model"
+    assert "tools.web_search=false" in argv
+    assert "tools.view_image=true" in argv, "the Claude arm can open a PNG"
+    for feature in ("browser_use", "computer_use", "multi_agent", "plugins"):
+        assert f"--disable {feature}" in flat
+    # Its own sandbox cannot start on this machine, and a session whose every command
+    # fails answers the prompt anyway rather than stopping. See the class docstring.
+    assert "danger-full-access" in argv and "workspace-write" not in argv
+    assert argv[-1] == "PLAY", "anything after the prompt is read as part of it"
+
+
+def test_a_session_gets_the_config_directory_its_own_cli_reads(tmp_path, monkeypatch):
+    """The same walk, guarded the same way, for a CLI that spells all three of the
+    directory, the credential and the variable differently."""
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    codex = AGENTS["codex"]
+    theirs = home / ".codex" / "auth.json"
+    theirs.parent.mkdir(parents=True)
+    theirs.write_text(json.dumps({"last_refresh": "2026-09-21T19:43:44.604670599Z"}))
+
+    config = run.session_config(tmp_path / "launch", "B4XPT", codex)
+    assert config == tmp_path / "launch" / ".sessions" / "B4XPT" / ".codex"
+    link = config / "auth.json"
+    assert link.is_symlink() and link.resolve() == theirs.resolve()
+    # And the same keep-the-fresher rule, on a stamp that is an age rather than an
+    # expiry: a session that refreshed its own copy does not get it taken away.
+    link.unlink()
+    link.write_text(json.dumps({"last_refresh": "2026-09-22T19:43:44.000000Z"}))
+    run.session_config(tmp_path / "launch", "B4XPT", codex)
+    assert not link.is_symlink(), "the refreshed token was replaced by an older one"
+
+
+def test_a_chained_codex_runs_cost_is_the_sum_of_its_sessions():
+    """The bug `Claude.absorb` already paid for here, on the other CLI. `codex exec`
+    plays one prompt, so each session reports its usage once, at its end — and a
+    stinted run is many sessions appending to one stream. Assigned rather than summed,
+    a thirty-session run would report its last session's bill as the run's."""
+    report = run.Report(label="B4XPT", workspace="x", agent="codex", model="gpt-5.6-sol")
+    codex = AGENTS["codex"]
+    for fresh, cached, out in ((1_000_000, 9_000_000, 100_000), (500_000, 4_500_000, 50_000)):
+        run.absorb(codex, report, json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": fresh + cached, "cached_input_tokens": cached,
+            "cache_write_input_tokens": 0, "output_tokens": out,
+            "reasoning_output_tokens": out // 2}}))
+    assert report.input_tokens == 15_000_000
+    assert report.cache_read_tokens == 13_500_000
+    price = PRICES["gpt-5.6-sol"]
+    expect = (1_500_000 * price["input"] + 13_500_000 * price["cached"]
+              + 150_000 * price["output"]) / 1_000_000
+    assert report.cost_usd == pytest.approx(expect)
+
+
+def test_reasoning_is_billed_once():
+    """Reasoning tokens are a part of `output_tokens`, not a third term beside it:
+    the CLI's own rollout reports `total_tokens == input_tokens + output_tokens`.
+    The adapter this was ported from added them again, which bills them twice."""
+    report = run.Report(label="B4XPT", workspace="x", agent="codex", model="gpt-6-astra")
+    run.absorb(AGENTS["codex"], report, json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+        "output_tokens": 1_000_000, "reasoning_output_tokens": 600_000}}))
+    assert report.output_tokens == 1_000_000
+    assert report.cost_usd == pytest.approx(PRICES["gpt-6-astra"]["output"])
+
+
+def test_an_unpriced_model_costs_nothing_rather_than_a_guess():
+    report = run.Report(label="B4XPT", workspace="x", agent="codex", model="gpt-unknown")
+    run.absorb(AGENTS["codex"], report, json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 10, "output_tokens": 10}}))
+    assert report.cost_usd == 0.0 and report.input_tokens == 10
+
+
+def history(home: Path, rows: list[tuple[int, dict]]) -> Path:
+    """A CLI thread history holding `rows`, as the real one is shaped."""
+    home.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(home / AGENTS["codex"].HISTORY)
+    db.execute("create table thread_items (created_at_ms int, item_json text)")
+    db.executemany("insert into thread_items values (?, ?)",
+                   [(at, json.dumps(item)) for at, item in rows])
+    db.commit()
+    db.close()
+    return home
+
+
+def test_a_picture_opened_by_eye_is_counted_and_audited(tmp_path):
+    """The failure this exists to prevent is silent. This CLI's stream carries no
+    event for looking at an image, so before harvesting a session could open any file
+    as a picture and the stream would show none of it."""
+    ws = tmp_path / "W"
+    ws.mkdir()
+    home = history(tmp_path / "home", [
+        (1000, {"type": "imageView", "path": "/ws/frames/000001.png"}),
+        (1001, {"type": "agentMessage", "text": "not this"}),
+    ])
+    codex, report = AGENTS["codex"], run.Report(label="W", workspace=str(ws))
+
+    at = run.harvest(codex, home, ws, report, since=0.0)
+    assert at == 1000
+    assert report.tool_calls == 1, "looking at a picture is a tool call on both arms"
+
+    events = [json.loads(line)
+              for line in (ws / "agent_stream.jsonl").read_text().splitlines()]
+    assert [e["type"] for e in events] == [HARVESTED], "the message was harvested too"
+    assert sum(codex.images(e) for e in events) == 1
+    assert codex.ran(events[0]) == ["/ws/frames/000001.png"], "the audit cannot see it"
+
+
+def test_a_picture_is_not_harvested_twice(tmp_path):
+    """A run's sessions share one history and a run outlives the launch that started
+    it, so the watermark has to be recoverable from the stream itself."""
+    ws = tmp_path / "W"
+    ws.mkdir()
+    home = history(tmp_path / "home", [(1000, {"type": "imageView", "path": "/a.png"})])
+    codex, report = AGENTS["codex"], run.Report(label="W", workspace=str(ws))
+
+    run.harvest(codex, home, ws, report, since=0.0)
+    assert run.harvested_since(ws) == 1000, "a later launch cannot find the watermark"
+    run.harvest(codex, home, ws, report, since=run.harvested_since(ws))
+
+    assert report.tool_calls == 1
+    assert len((ws / "agent_stream.jsonl").read_text().splitlines()) == 1
+
+
+def test_a_shell_that_could_not_start_is_told_apart_from_giving_up():
+    """Not the agent's doing, and it does not get better with a retry: when the shell
+    cannot start this CLI answers the prompt out of what it expected the commands to
+    produce, which leaves a session that spoke and ran nothing."""
+    codex = AGENTS["codex"]
+    assert codex.no_commands(turns=3, tool_calls=0)
+    assert not codex.no_commands(turns=3, tool_calls=9), "it ran things and stopped"
+    assert not codex.no_commands(turns=0, tool_calls=0), "it never started"
+    assert not AGENTS["claude"].no_commands(turns=3, tool_calls=0)
+
+
+def test_a_codex_chain_harvests_every_session_and_sets_each_one_a_home(tmp_path, monkeypatch):
+    """The loop, end to end, with the CLI faked. Each session is handed its own CLI's
+    config directory under that CLI's own variable, is fenced, and has its history
+    harvested before the next one starts — so every picture is counted once."""
+    ws = tmp_path / "W"
+    ws.mkdir()
+    (ws / "state.json").write_text(json.dumps(
+        {"obs": ["tty"], "actions_used": 0, "terminal": False}))
+    home = tmp_path / ".sessions" / "W" / ".codex"
+    seen: list[tuple[list[str], dict]] = []
+
+    async def fake_act(where, *argv):
+        if argv[0] == "init":
+            state = json.loads((ws / "state.json").read_text())
+            state["actions_used"] += 10
+            (ws / "state.json").write_text(json.dumps(state))
+        return ""
+
+    async def fake_session(argv, where, env, report, agent):
+        n = len(seen)
+        seen.append((argv, env))
+        history_rows = [(1000 + i, {"type": "imageView", "path": f"/p{i}.png"})
+                        for i in range(n + 1)]
+        (home / AGENTS["codex"].HISTORY).unlink(missing_ok=True)
+        history(home, history_rows)
+        return "", 0
+
+    monkeypatch.setattr(run, "act", fake_act)
+    monkeypatch.setattr(run, "one_session", fake_session)
+    monkeypatch.setattr(run, "refresh_brief", lambda w, o: None)
+    monkeypatch.setattr(run, "audit_session", lambda *a, **k: run.Audit())
+    monkeypatch.setattr(run, "fenced_argv", lambda agent, argv, w, h: ["FENCE", *argv])
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "nobody"))
+    (tmp_path / ".envs" / "W").mkdir(parents=True)
+    (tmp_path / ".envs" / "W" / "result.json").write_text(json.dumps(
+        {f: 0 for f in ("actions_used", "best_episode", "episodes_completed",
+                        "mean_episode", "score", "lives", "deaths", "quits", "turns",
+                        "unique_cells", "max_depth", "max_xplevel")}
+        | {"episode_scores": [], "endings": [], "roles": []}))
+    args = type("A", (), {
+        "carry_on": str(tmp_path), "replay": None, "obs": ["tty"], "budget": 500,
+        "stint": 10, "max_sessions": 3, "fresh_world": False, "agent": "codex",
+        "model": "gpt-5.6-sol", "dry_run": False, "retries": 2, "opening": "blind",
+        "idle_wait": 0, "no_fence": False,
+    })()
+    report = asyncio.run(run.play("W", ("nethack", 0), tmp_path, args, {}, ["W"],
+                                  asyncio.Semaphore(1)))
+
+    assert report.fenced and report.sessions == 3
+    assert all(argv[0] == "FENCE" and argv[1] == "codex" for argv, _ in seen)
+    assert all(env["CODEX_HOME"] == str(home) for _, env in seen)
+    assert all("CLAUDE_CONFIG_DIR" not in env for _, env in seen)
+    # Session n's history holds n pictures, one per session so far: three in all,
+    # each harvested once.
+    assert report.tool_calls == 3
+    lines = (ws / "agent_stream.jsonl").read_text().splitlines()
+    assert sorted(json.loads(line)["item"]["path"] for line in lines) == [
+        "/p0.png", "/p1.png", "/p2.png"]
+
+
+def test_no_fence_is_recorded_as_no_fence(tmp_path, monkeypatch):
+    """`--no-fence` exists to find out what a session reaches for, and a report from
+    one must not claim a fence it was not given."""
+    assert AGENTS["codex"].FENCED, "the arm that reached on cc_craftax is unfenced here"
+    assert not AGENTS["claude"].FENCED, "fencing this arm rewrites M6"
+    assert run.Report(label="W", workspace="/w").fenced is False
+
+
+# --------------------------------------------------------------------------- #
+# The fence
+# --------------------------------------------------------------------------- #
+
+
+def fenced(argv: list[str], ws: Path) -> subprocess.CompletedProcess:
+    """Run `argv` under exactly the fence a codex session of this launch would get."""
+    import fence
+
+    if not fence.supported():
+        pytest.skip("this kernel has no Landlock, so there is no fence to test")
+    if not run.shutil.which("codex"):
+        pytest.skip("codex is not installed, so there is no binary to fence")
+    full = run.fenced_argv(AGENTS["codex"], ["codex"], ws, ws)
+    wrapped = full[: full.index("--")] + ["--", *argv]
+    return subprocess.run(wrapped, cwd=ws, capture_output=True, text=True, timeout=120)
+
+
+def reads(path: Path, ws: Path) -> bool:
+    """Whether a fenced session can read this file."""
+    return fenced(["cat", str(path)], ws).returncode == 0
+
+
+def test_a_fenced_session_cannot_reach_the_game_it_is_playing(tmp_path):
+    """The reach this exists to close, named file by file: the package's second copy
+    of the game and its data, this harness's floors and populations, the launcher."""
+    ws = run.make_workspace(tmp_path, "W", ["tty"], "blind")
+    package = run.site_packages(ROOT / ".env-venv") / "nle"
+    assert package.exists(), "the package moved, so this test proves nothing"
+
+    assert not reads(package / "__init__.py", ws), "the package is readable"
+    assert not reads(ROOT / "tools" / "baselines.py", ws), "the floors are readable"
+    assert not reads(ROOT / "run.py", ws), "the launcher is readable"
+    # Its names are listable, as everything under `site-packages` is: a list-only
+    # grant covers the hierarchy, which is what lets Python find `pydantic`. What is
+    # shut is every file's contents, the game's data among them.
+    assert not reads(package / "nethackdir" / "nhdat", ws), "the game's data is readable"
+    assert fenced(["ls", str(Path.home())], ws).returncode != 0, "the home is walkable"
+    blocked = fenced([str(run.bin_dir(tmp_path) / "env-python"), "-c", "import nle"], ws)
+    assert blocked.returncode != 0, "the actuator's interpreter imports the game"
+
+
+def test_the_fence_keeps_everything_a_session_plays_with(tmp_path):
+    """Fenced too tight is a run that cannot play, and the failure would arrive as a
+    session that scored nothing rather than as an error. `./act` is the whole of what
+    a session does, so it is run for real: through the workspace's own shim, the
+    launch's neutral names and the symlinked actuator, against a live game."""
+    ws = run.make_workspace(tmp_path, "W", ["tty"], "blind")
+    asyncio.run(run.act(ws, "init", "--variant", "nethack", "--seed", "0",
+                        "--budget", "5", "--obs", "tty",
+                        "--env-dir", str(tmp_path / ".envs" / "W")))
+    try:
+        played = fenced(["./act", "do", "s", "--plan", "look"], ws)
+        assert played.returncode == 0, played.stdout + played.stderr
+        status = fenced(["./act", "status"], ws)
+        assert status.returncode == 0 and "1/5" in status.stdout, status.stdout
+        done = fenced(["sh", "-c", "echo kept > notes.md && cat notes.md"], ws)
+        assert done.stdout.strip() == "kept", "a session cannot keep notes"
+        pictures = fenced(["./python", "-c", "import numpy, PIL.Image; print('ok')"], ws)
+        assert pictures.stdout.strip() == "ok", pictures.stderr
+    finally:
+        asyncio.run(run.act(ws, "stop"))

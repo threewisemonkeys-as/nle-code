@@ -443,3 +443,31 @@ def test_the_page_is_one_self_contained_file(launch, tmp_path):
     assert "src=" not in page
     # And nothing left beside it: the atomic rename leaves no scratch file behind.
     assert not list(out.parent.glob("*.part"))
+
+
+def test_a_codex_session_is_attributed_to_its_batches_too(tmp_path):
+    """A live Codex page with every batch unexplained is what cc_craftax shipped
+    first: its stream was read as Claude's and yielded no moments. The CLI is sniffed
+    from the stream, so a run that is still playing is read as what it is."""
+    stream = tmp_path / "agent_stream.jsonl"
+    stream.write_text("\n".join(json.dumps(event) for event in (
+        {"type": "thread.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "looking"}},
+        {"type": "item.completed", "item": {"type": "command_execution",
+                                            "command": "cat notes.md",
+                                            "aggregated_output": "...", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "command_execution",
+                                            "command": "./act do s --plan wait",
+                                            "aggregated_output": reply(3),
+                                            "exit_code": 0}},
+        {"type": "harvested.item", "at": 1,
+         "item": {"type": "imageView", "path": str(tmp_path / "frames" / "1.png")}},
+    )))
+    said = replay.moments(stream, tmp_path)
+    assert [m["kind"] for m in said] == ["say", "tool", "tool", "tool"]
+    assert said[-1]["name"] == "view_image" and said[-1]["title"] == "./frames/1.png"
+    work, played = replay.assign([1], said)
+    assert played[0]["title"] == "./act do s --plan wait"
+    # The picture was opened after the last batch, and trailing work belongs to it.
+    assert [m.get("title", m.get("text")) for m in work[0]] == [
+        "looking", "cat notes.md", "./frames/1.png"]

@@ -183,3 +183,55 @@ def test_a_run_carries_its_lives_and_its_rungs(played):
     assert got["best"] == max(got["per_life"])
     # Both rungs, always: the higher one alone is what hides an unbalanced run.
     assert got["best"] == max(got["depth_rung"], got["xp_rung"])
+
+
+def codex_stream(where: Path, events: list[dict]) -> Path:
+    where.mkdir(parents=True, exist_ok=True)
+    stream = where / "agent_stream.jsonl"
+    stream.write_text("\n".join(json.dumps(event) for event in events))
+    return stream
+
+
+def test_a_codex_stream_is_read_as_codex_and_priced_from_its_model(tmp_path):
+    """Neither CLI's stream reads as the other's. Read as Claude's, a Codex stream has
+    no sessions, no tool calls and no cost — a readout of nothing that looks like a
+    readout of a session that did nothing. The model is taken from what the CLI kept
+    for the session, because a run that is still playing has no report to say."""
+    ws = tmp_path / "launch" / "ZJLJX"
+    stream = codex_stream(ws, [
+        {"type": "thread.started", "thread_id": "a"},
+        {"type": "item.completed", "item": {"type": "command_execution",
+                                            "command": "./act do s", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1_000_000,
+                                             "cached_input_tokens": 900_000,
+                                             "output_tokens": 10_000}},
+        {"type": "thread.started", "thread_id": "b"},
+        {"type": "harvested.item", "at": 1, "item": {"type": "imageView", "path": "/a.png"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 500_000,
+                                             "cached_input_tokens": 400_000,
+                                             "output_tokens": 5_000}},
+    ])
+    kept = tmp_path / "launch" / ".sessions" / "ZJLJX" / ".codex" / "sessions" / "2026" / "09" / "22"
+    kept.mkdir(parents=True)
+    (kept / "rollout-x.jsonl").write_text(json.dumps(
+        {"type": "turn_context", "payload": {"model": "gpt-6-astra"}}, separators=(",", ":")))
+
+    said = readout.agent(stream)
+    assert said["cli"] == "codex" and said["model"] == "gpt-6-astra"
+    assert said["sessions"] == 2 and said["turns"] == 1 and said["tool_calls"] == 2
+    price = readout.priced("gpt-6-astra", input_tokens=1_500_000, output_tokens=15_000,
+                           cache_read_tokens=1_300_000)
+    assert said["cost_usd"] == pytest.approx(round(price, 2)) and price > 0
+    assert said["cache_read_tokens"] == 1_300_000 and said["output_tokens"] == 15_000
+
+
+def test_the_report_names_the_model_once_there_is_one(tmp_path):
+    ws = tmp_path / "launch" / "ZJLJX"
+    codex_stream(ws, [{"type": "thread.started"}])
+    reports = tmp_path / "launch" / ".rig" / "reports"
+    reports.mkdir(parents=True)
+    (reports / "ZJLJX.json").write_text(json.dumps({"model": "gpt-5.6-sol"}))
+    assert readout.model_of(ws, "codex") == "gpt-5.6-sol"
+    assert readout.model_of(tmp_path / "launch" / "NOPE", "codex") == "gpt-5.6-sol", \
+        "with nothing to read, the adapter's default"
