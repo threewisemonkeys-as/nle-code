@@ -35,6 +35,7 @@ import os
 import secrets
 import shutil
 import sys
+import textwrap
 import time
 from datetime import UTC, datetime
 from itertools import count
@@ -248,6 +249,27 @@ OPENING = {
 }
 
 
+# The width GAME.md is wrapped to by hand.
+WIDTH = 86
+
+
+def reflow(text: str) -> str:
+    """Rewrap the paragraphs a substitution pushed past `WIDTH`, and no others.
+
+    A placeholder sits inside a hand-wrapped paragraph, so whatever fills it leaves
+    one line as long as the two put together — 130 characters in the middle of a
+    file wrapped at 86, and 250 for the list of channels. Only the paragraphs that
+    now overflow are touched: every other one keeps the line breaks it was written
+    with, so the brief is the template's text wherever nothing was filled in.
+    """
+    return "\n\n".join(
+        textwrap.fill(" ".join(para.split()), WIDTH,
+                      break_long_words=False, break_on_hyphens=False)
+        if any(len(line) > WIDTH for line in para.splitlines()) else para
+        for para in text.split("\n\n")
+    )
+
+
 def brief(channels: list[str], opening: str = "blind", fresh_world: bool = True) -> str:
     """GAME.md with its generated paragraphs filled in.
 
@@ -285,7 +307,7 @@ def brief(channels: list[str], opening: str = "blind", fresh_world: bool = True)
         "You wake up as the same thing in the same place every time, so what you "
         "learned about either still holds."
     )
-    return (
+    return reflow(
         (REPO / "GAME.md").read_text()
         .replace("{opening}", OPENING[opening])
         .replace("{observations}", f"{body} That is the whole of what you are given.")

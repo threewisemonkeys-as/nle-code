@@ -17,9 +17,11 @@ Three things differ from the Craftax port it is cut down from:
 * **A life can be ended by the player, and that is the game.** Craftax removed the
   ``reset`` this harness had added, because none of its 43 actions abandoned a
   life. NetHack ships ``#quit`` and ``S``, so both stay: they are keys of the
-  game as much as ``h`` is. What stops them being farmable is that every life of a
-  run is dealt the same character in the same dungeon (F6, F14) — quitting to
-  re-roll gets the same roll back.
+  game as much as ``h`` is. They used to be unfarmable because every life of a run
+  was dealt the same character in the same dungeon (F6, F14), so quitting to
+  re-roll got the same roll back. Since the default became a new game every life
+  (2026-09-24) that no longer holds: a quit on the first turn is a re-roll, and
+  it costs only the keys it takes. ``--same-world`` restores the old guarantee.
 * **There is no denominator.** Craftax quoted everything as a percentage of 226.
   NetHack's score has no maximum, so a run is quoted in points, beside the median
   human game and the Challenge's own bots (F10, F11).

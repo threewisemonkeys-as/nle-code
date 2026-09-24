@@ -337,7 +337,11 @@ class NleGame:
         return reward, episode.alive
 
     def restart(self) -> None:
-        """End this life and begin the next, in the same game unless told otherwise."""
+        """End this life and begin the next.
+
+        By default the next one is a *new game*, a new dungeon and character from the
+        next life's seeds (see `_seeds`); `fresh_world=False` deals this one again.
+        """
         self.episodes[-1].ended = self.episodes[-1].ended or "restart"
         self._begin()
 
