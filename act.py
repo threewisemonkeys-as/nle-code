@@ -86,7 +86,7 @@ class RunState(BaseModel):
     variant: str = "nethack"
     seed: int = 0
     obs: list[str] = list(DEFAULT_CHANNELS)
-    fresh_world: bool = False
+    fresh_world: bool = True
     # Whether the game is allowed to name itself in the observations. Off by
     # default: the opening screen says `welcome to NetHack!` and so does `v`, and a
     # session that was not told what it is playing should not be told by the first
@@ -920,8 +920,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         "--stint", str(args.stint),
         "--obs", *args.obs,
     ]
-    if args.fresh_world:
-        argv.append("--fresh-world")
+    # Spelled out rather than appended only when true. The default is fresh, and a
+    # flag that is passed only on one side of a default leaves the daemon deciding
+    # the world rule for itself — which is how the two ends come apart when a
+    # default moves. Say it either way and the daemon's own default never applies.
+    argv.append("--fresh-world" if args.fresh_world else "--same-world")
     if args.named:
         argv.append("--named")
     if args.resume:
@@ -976,9 +979,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help=f"default {DEFAULT_BUDGET} by variant")
         p.add_argument("--obs", nargs="+", choices=CHANNELS, default=list(DEFAULT_CHANNELS),
                        help="which of the package's own observations to write")
-        p.add_argument("--fresh-world", action="store_true",
-                       help="roll a new character and dungeon on each life instead "
-                            "of dealing this one again")
+        world = p.add_mutually_exclusive_group()
+        world.add_argument("--fresh-world", dest="fresh_world", action="store_true",
+                           help="roll a new character and dungeon on each life (the default)")
+        world.add_argument("--same-world", dest="fresh_world", action="store_false",
+                           help="deal this one character and dungeon again every life, "
+                                "so a route or a saved opening carries across deaths")
+        p.set_defaults(fresh_world=True)
         p.add_argument("--named", action="store_true",
                        help="let the game name itself in the observations. The "
                             "default redacts that one word, because a session that "

@@ -248,14 +248,20 @@ OPENING = {
 }
 
 
-def brief(channels: list[str], opening: str = "blind") -> str:
-    """GAME.md with its two generated paragraphs filled in.
+def brief(channels: list[str], opening: str = "blind", fresh_world: bool = True) -> str:
+    """GAME.md with its generated paragraphs filled in.
 
     Generated rather than written, so a run with a different `--obs` cannot end up
     with a brief describing a channel it does not have, and so the named and blind
     conditions cannot drift apart in any way except the sentence that names the
     game. The channel wording says where the files go and nothing about what is in
     them.
+
+    What a death costs is generated for the same reason, and it is not cosmetic. A
+    run that replays one game rewards remembering it — a route, a saved opening —
+    and a run that rolls a new character punishes exactly that. Two sentences said
+    the world repeats, not one: the second promised the same character in the same
+    place, which is the more specific lie of the two when a new game is dealt.
     """
     said = [SAID[c] for c in CHANNELS if c in channels]
     if len(said) == 1:
@@ -265,10 +271,26 @@ def brief(channels: list[str], opening: str = "blind") -> str:
             "What you can see is written down every time you act, in more than one "
             "form: " + ", ".join(said[:-1]) + f", and {said[-1]}."
         )
+    # Both read into the sentences around them in GAME.md: `{death}` continues "and
+    # the run carries on spending the same budget", and `{carry}` stands alone.
+    death = (
+        "If you die a new game is dealt"
+        if fresh_world else
+        "If you die the game starts again from its beginning"
+    )
+    carry = (
+        "You wake up as something else somewhere else every time, so what you "
+        "learned about either may not hold."
+        if fresh_world else
+        "You wake up as the same thing in the same place every time, so what you "
+        "learned about either still holds."
+    )
     return (
         (REPO / "GAME.md").read_text()
         .replace("{opening}", OPENING[opening])
         .replace("{observations}", f"{body} That is the whole of what you are given.")
+        .replace("{death}", death)
+        .replace("{carry}", carry)
     )
 
 
@@ -313,7 +335,8 @@ def bin_dir(root: Path) -> Path:
     return where
 
 
-def make_workspace(root: Path, label: str, channels: list[str], opening: str) -> Path:
+def make_workspace(root: Path, label: str, channels: list[str], opening: str,
+                   fresh_world: bool = True) -> Path:
     """A workspace holds the prompt, a way to act, a way to look, and nothing else.
 
     The brief says what this environment is; PROMPT.md says how to play and names no
@@ -337,7 +360,7 @@ def make_workspace(root: Path, label: str, channels: list[str], opening: str) ->
     ws = root / label
     ws.mkdir(parents=True)
     (ws / "CLAUDE.md").write_text(
-        brief(channels, opening) + "\n" + (REPO / "PROMPT.md").read_text()
+        brief(channels, opening, fresh_world) + "\n" + (REPO / "PROMPT.md").read_text()
     )
     for name, interpreter, script in (
         ("act", neutral / "env-python", f' "{neutral / "actuator.py"}"'),
@@ -361,10 +384,18 @@ def refresh_brief(ws: Path, opening: str) -> None:
     reason the game does — they are part of what this run is. Nothing else in the
     workspace is touched: notes.md and the helper scripts are the session's, and
     CLAUDE.md is the harness's.
+
+    The world rule comes from the record too. `--continue` passes no world flag, so
+    a brief that read the arguments would flip the rule under a run halfway through
+    it. `False` is the fallback rather than the current default: a state.json
+    without the key was written before the default moved to fresh worlds, and every
+    run from that era replayed one game.
     """
-    channels = list(json.loads((ws / "state.json").read_text())["obs"])
+    state = json.loads((ws / "state.json").read_text())
+    channels = list(state["obs"])
     (ws / "CLAUDE.md").write_text(
-        brief(channels, opening) + "\n" + (REPO / "PROMPT.md").read_text()
+        brief(channels, opening, bool(state.get("fresh_world", False)))
+        + "\n" + (REPO / "PROMPT.md").read_text()
     )
 
 
@@ -716,7 +747,8 @@ async def play(
             refresh_brief(ws, args.opening)  # before `act init --again`, which clears state.json
             print(f"[{label}] replaying with the last session's notes", flush=True)
         else:
-            ws, how = make_workspace(root, label, args.obs, args.opening), "fresh"
+            ws, how = make_workspace(root, label, args.obs, args.opening,
+                                     args.fresh_world), "fresh"
 
         # On a kept workspace the channels are the record's, not the arguments' —
         # `act --resume` ignores `--obs` for the same reason, and a report that
@@ -752,8 +784,9 @@ async def play(
                 "--obs", *args.obs,
                 "--env-dir", str(env_dir),
             ]
-            if args.fresh_world:
-                out.append("--fresh-world")
+            # Always spelled out — see the daemon's argv in act.py for why a flag
+            # that rides on a default is a flag waiting to disagree with itself.
+            out.append("--fresh-world" if args.fresh_world else "--same-world")
             if args.opening == "named":
                 # The brief and the observations agree about this or neither is
                 # worth anything: a session told nothing, whose first screen says
@@ -1100,9 +1133,14 @@ async def main() -> int:
     parser.add_argument("--opening", choices=sorted(OPENING), default="blind",
                         help="whether the brief withholds the game (default) or "
                              "names it, which is the ablation")
-    parser.add_argument("--fresh-world", action="store_true",
-                        help="roll a new character and dungeon on each life instead "
-                             "of dealing this one again")
+    world = parser.add_mutually_exclusive_group()
+    world.add_argument("--fresh-world", dest="fresh_world", action="store_true",
+                       help="roll a new character and dungeon on each life (the default)")
+    world.add_argument("--same-world", dest="fresh_world", action="store_false",
+                       help="deal this one character and dungeon again every life. A "
+                            "deterministic game rewards recording a good life and "
+                            "re-executing it, so much of the budget stops being play")
+    parser.set_defaults(fresh_world=True)
     parser.add_argument("--agent", default="claude", choices=sorted(AGENTS))
     fencing = parser.add_mutually_exclusive_group()
     fencing.add_argument(

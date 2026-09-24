@@ -213,7 +213,7 @@ class NleGame:
         variant: str = "nethack",
         seed: int = 0,
         obs: tuple[str, ...] = DEFAULT_CHANNELS,
-        fresh_world: bool = False,
+        fresh_world: bool = True,
         blind: bool = True,
         savedir: str | None = None,
     ) -> None:
@@ -269,11 +269,13 @@ class NleGame:
     def _seeds(self, life: int) -> tuple[int, int]:
         """The seeds for one life.
 
-        By default every life of a run is dealt the *same* game: the same dungeon,
-        the same character, the same first three levels. What the session learned
-        about this map still applies, and a life it has already played replays the
-        same way. `fresh_world=True` rolls a new one per life, which is what the
-        Challenge does and is the generalisation setting rather than the default.
+        By default every life is rolled anew: a new dungeon, a new character, and
+        nothing the session learned about the last one guaranteed to hold. That is
+        what the Challenge does, and since 2026-09-24 it is what this harness does.
+        `fresh_world=False` deals the *same* game every life instead — the same
+        dungeon and character, and a life already played replays the same way,
+        which is what lets a session record a good life and re-execute it rather
+        than play.
 
         Two seeds, not one, because NetHack has two RNGs and NLE takes both: core
         for the game and disp for the anti-TAS display stream. They are derived

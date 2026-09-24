@@ -75,6 +75,76 @@ def test_the_two_openings_differ_in_one_paragraph_and_nothing_else(tmp_path):
     assert named[named.index(tail):] == blind[blind.index(tail):]
 
 
+def test_the_brief_says_what_a_death_costs_and_it_matches_the_run(tmp_path):
+    """The one thing a session can act on between lives.
+
+    Two sentences asserted the same-world rule here, not one: the second promised
+    the same character in the same place, which is the more specific falsehood when
+    a new game is dealt. Both were hardcoded until the default moved to fresh on
+    2026-09-24, which would have told every run the game repeats while it did not.
+    Tie each wording to the setting so the two cannot come apart again.
+    """
+    kept = (run.make_workspace(tmp_path / "k", "B4XPT", ["tty"], "blind", False)
+            / "CLAUDE.md").read_text()
+    dealt = (run.make_workspace(tmp_path / "f", "K7M3Q", ["tty"], "blind", True)
+             / "CLAUDE.md").read_text()
+
+    assert "starts again from its beginning" in kept
+    assert "the same thing in the same place" in kept
+    assert "a new game is dealt" in dealt
+    assert "something else somewhere else" in dealt
+    assert "starts again from its beginning" not in dealt
+    assert "the same thing in the same place" not in dealt
+    for filled in (kept, dealt):
+        assert "{death}" not in filled and "{carry}" not in filled, "placeholder left unfilled"
+
+    # The whole assembled CLAUDE.md, not just the generated half. PROMPT.md carried
+    # "the same actions from the beginning do the same things" as fixed doctrine
+    # until 2026-09-24 — under a fresh game that is false, and it is also a recipe
+    # for the replay strategy that stops a run being played. Claims about what
+    # survives a death belong to the brief, which knows the setting.
+    for claim in ("the same as what you started in", "still holds",
+                  "the same actions from the beginning"):
+        assert claim not in dealt, f"a fresh-world brief still promises {claim!r}"
+
+
+def test_a_refreshed_brief_takes_the_world_rule_from_the_record(tmp_path):
+    """`--continue` passes no world flag, so a refreshed brief that read the
+    arguments would flip the rule under a run halfway through it. It reads the
+    record, as it already does for the channels."""
+    ws = run.make_workspace(tmp_path, "B4XPT", ["tty"], "blind", True)
+    (ws / "state.json").write_text(json.dumps(
+        {"obs": ["tty"], "fresh_world": False, "actions_used": 0, "terminal": False}))
+    run.refresh_brief(ws, "blind")
+    assert "starts again from its beginning" in (ws / "CLAUDE.md").read_text()
+
+
+def test_a_run_deals_a_new_game_each_life_unless_told_otherwise(tmp_path):
+    """The default moved from one replayed game to a fresh one on 2026-09-24.
+
+    A deterministic game is not the same benchmark played repeatedly — it is a
+    benchmark that stops being played. The matched Craftax arm wrote itself a
+    `replay.py` and spent 69% of a 30,000-action budget re-executing a recorded
+    life. Fresh games price that out, and they are what the NetHack Challenge
+    scores anyway.
+
+    The rule has to hold in three places at once, or a run is told one thing and
+    given another: the record's default, the actuator's CLI, and the brief.
+    """
+    import act  # noqa: PLC0415
+
+    assert act.RunState().fresh_world is True, "the record's default"
+    parser = act.build_parser()
+    assert parser.parse_args(["init"]).fresh_world is True, "the actuator's default"
+    assert parser.parse_args(["init", "--same-world"]).fresh_world is False
+    assert parser.parse_args(["serve", "--same-world"]).fresh_world is False, "and the daemon's"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["init", "--fresh-world", "--same-world"])
+
+    brief = (run.make_workspace(tmp_path, "B4XPT", ["tty"], "blind") / "CLAUDE.md").read_text()
+    assert "a new game is dealt" in brief, "what a default run tells its session"
+
+
 def test_the_brief_says_which_channels_this_run_gives(tmp_path):
     """Written by hand it would drift from what the log carries the first time
     somebody ran with a different --obs."""

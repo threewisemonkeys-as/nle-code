@@ -82,10 +82,8 @@ last.
   apart from its most plausible rival, and run that one.
 - Dying is not the end of the run and not a wasted action. The observation it produced
   is the state you died in, and it is the only place that state is ever shown — read it
-  before you move on. What you wake up in is the same as what you started in, so
-  everything you worked out still holds and the same actions from the beginning do the
-  same things. What you lost is what you had gathered and where you stood, which is most
-  of what a life is worth, so it is a real loss and worth avoiding.
+  before you move on. What you lost is what you had gathered and where you stood, which
+  is most of what a life is worth, so it is a real loss and worth avoiding.
 - Shell and Python loops around `./act` are encouraged — branch on a parsed
   observation, repeat until something changes, search for a position. You are not
   limited to fixed action lists, and the environment is fast: the wall clock is you.

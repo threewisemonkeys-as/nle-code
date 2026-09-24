@@ -140,8 +140,12 @@ def test_a_prefix_replays_bit_exactly():
     assert rollout() == rollout()
 
 
-def test_the_same_game_is_dealt_again_on_restart():
-    made = NleGame(seed=21)
+def test_the_same_game_is_dealt_again_on_restart_when_asked():
+    """`fresh_world=False` is named rather than taken from the default, which moved
+    to fresh on 2026-09-24. Replaying one game is still offered — it is what lets a
+    session walk back to where it died — but it is no longer what a run gets by
+    default, because a budget spent re-executing a recorded life is not play."""
+    made = NleGame(seed=21, fresh_world=False)
     opening = made.screen()
     made.restart()
     assert made.screen() == opening
@@ -150,11 +154,11 @@ def test_the_same_game_is_dealt_again_on_restart():
     made.close()
 
 
-def test_fresh_world_deals_a_new_one():
-    made = NleGame(seed=21, fresh_world=True)
+def test_a_new_game_is_dealt_on_restart_by_default():
+    made = NleGame(seed=21)
     opening = made.screen()
     made.restart()
-    assert made.screen() != opening
+    assert made.screen() != opening, "the default dealt the same game again"
     made.close()
 
 

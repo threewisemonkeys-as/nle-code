@@ -10,10 +10,9 @@ would eat.
 {observations}
 
 There is one budget and it is shared. Every keystroke counts against it, including the
-ones the game ignores, and nothing is held back for later. If you die the game starts
-again from its beginning and the run carries on spending the same budget — what dying
-cost you is the keys you had already spent. You wake up as the same thing in the same
-place every time, so what you learned about either still holds.
+ones the game ignores, and nothing is held back for later. {death} and the run carries
+on spending the same budget — what dying cost you is the keys you had already spent.
+{carry}
 
 Acting is sometimes rewarded. A number comes back with a key when it was worth
 something; it is the change in a number the game itself puts on the screen. What this
