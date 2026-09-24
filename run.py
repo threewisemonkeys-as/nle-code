@@ -59,7 +59,7 @@ from nle_game import CHANNELS, DEFAULT_CHANNELS, VARIANTS  # noqa: E402
 # The launch root, and its name is part of the fence: a workspace is the session's
 # working directory, so `pwd` puts every component of this path in front of it. The
 # siblings called theirs after the game (`craftax-runs`); this one must not (F18).
-RUNS = Path(os.environ.get("NLE_RUNS") or Path.home() / "agent-runs")
+RUNS = Path(os.environ.get("RUNS_ROOT") or Path.home() / "agent-runs")
 # The interpreter the workspace's `python` shim points at: numpy and Pillow, and
 # deliberately not the package — `from nle import nethack` reaches the glyph table
 # and a second copy of the game. Built by tools/make_agent_venv.sh.
