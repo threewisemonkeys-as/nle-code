@@ -591,19 +591,60 @@ def pairs_under(where: Path) -> list[tuple[Path, Path]]:
             for label in json.loads(labels.read_text())]
 
 
-def build(where: Path) -> dict:
-    """The whole bundle the page is rendered from."""
+def model_of(ws: Path, report: dict | None) -> str:
+    """Which model played a workspace: the report's word once the launch is over,
+    the stream's `init` event while it is still playing."""
+    if report and report.get("model"):
+        return str(report["model"])
+    stream = ws / "agent_stream.jsonl"
+    if stream.exists():
+        with stream.open(errors="replace") as lines:
+            for line in lines:
+                if '"subtype":"init"' in line.replace(" ", ""):
+                    try:
+                        if found := json.loads(line).get("model"):
+                            return str(found)
+                    except json.JSONDecodeError:
+                        pass
+    return ""
+
+
+def arm_of(ws: Path, env_dir: Path) -> str:
+    """The name a run goes by when a page holds several: the model, the keys it was
+    budgeted, the stint its sessions played and whether a death dealt a new dungeon —
+    `opus-5-5 · 30k keys · stint 3k · fresh world`. Every run here is one CLI on one
+    seed, and those four are what tell them apart."""
+    report_file = ws.parent / ".rig" / "reports" / f"{ws.name}.json"
+    try:
+        report = json.loads(report_file.read_text()) if report_file.exists() else None
+    except json.JSONDecodeError:
+        report = None
+    record = load_record(env_dir / "result.json")
+    model = model_of(ws, report).removeprefix("claude-") or "?"
+    def short(n: int) -> str:
+        return f"{n / 1000:g}k" if n >= 1000 else str(n)
+    budget = int(record.get("budget") or 0)
+    stint = int(record.get("stint") or budget)
+    world = "fresh" if record.get("fresh_world") else "same"
+    return f"{model} · {short(budget)} keys · stint {short(stint)} · {world} world"
+
+
+def build(where: Path | list[Path]) -> dict:
+    """The whole bundle the page is rendered from, over one launch or several."""
+    wheres = [where] if isinstance(where, Path) else list(where)
     runs = []
-    for ws, env_dir in pairs_under(where):
+    for ws, env_dir in [pair for one in wheres for pair in pairs_under(one)]:
         built = one_run(ws, env_dir)
         if built is None:
             print(f"{ws.name}: nothing was played", flush=True)
             continue
+        built["launch"] = ws.parent.name
+        built["arm"] = arm_of(ws, env_dir)
         runs.append(built)
         print(f"{ws.name}: {built['used']}/{built['budget']} keys, "
               f"{len(built['plans'])} batches, best life {built['best']}", flush=True)
     return {
-        "launch": where.name,
+        "launch": " + ".join(one.name for one in wheres),
         "built": time.strftime("%Y-%m-%d %H:%M"),
         # Whether there is more of this run to come. Not the socket: the launcher
         # stops the daemon between stints, so a live run has no socket for the
@@ -638,12 +679,13 @@ def render(bundle: dict, out: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="replay", description=__doc__.splitlines()[0])
-    parser.add_argument("where", type=Path,
-                        help="a launch directory, or one workspace inside one")
+    parser.add_argument("where", type=Path, nargs="+",
+                        help="launch directories, or workspaces inside them; "
+                             "several put their runs on one page")
     parser.add_argument("--out", type=Path, default=Path("replay.html"))
     args = parser.parse_args()
 
-    bundle = build(args.where.expanduser().resolve())
+    bundle = build([one.expanduser().resolve() for one in args.where])
     if not bundle["runs"]:
         raise SystemExit("replay: nothing to show")
     size = render(bundle, args.out.expanduser().resolve())

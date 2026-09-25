@@ -33,14 +33,14 @@ import replay  # noqa: E402
 def launch(tmp_path):
     """One workspace inside a launch, played key by key with real batches."""
 
-    def build(batches, seed=3, budget=200):
-        root = tmp_path / "launch"
-        ws, env_dir = root / "AAAAA", root / ".envs" / "AAAAA"
+    def build(batches, seed=3, budget=200, name="launch", label="AAAAA"):
+        root = tmp_path / name
+        ws, env_dir = root / label, root / ".envs" / label
         ws.mkdir(parents=True)
         env_dir.mkdir(parents=True)
         (root / ".rig").mkdir()
         (root / ".rig" / "labels.json").write_text(
-            json.dumps({"AAAAA": {"variant": "nethack", "seed": seed}})
+            json.dumps({label: {"variant": "nethack", "seed": seed}})
         )
         state = act.RunState(seed=seed, obs=["tty"], budget=budget, env_dir=str(env_dir))
         session = act.Session.create(ws, state)
@@ -428,6 +428,24 @@ def test_the_page_carries_the_rung_at_every_step(launch):
     assert got["per_life"] == [
         round(rung(one["depth"], one["xp"]), 2) for one in built["lives_played"]
     ]
+
+
+def test_several_launches_share_one_page(launch, tmp_path):
+    """The chart compares runs, and runs are launched one at a time — so one page
+    takes as many launches as it is given, and names each run by what sets it apart
+    from the others rather than by its random label."""
+    first, _, _ = launch([(["l", "l"], "east")], name="one", label="AAAAA")
+    second, _, _ = launch([(["h"], "west")], budget=300, name="two", label="BBBBB")
+    bundle = replay.build([first, second])
+    assert [r["label"] for r in bundle["runs"]] == ["AAAAA", "BBBBB"]
+    assert bundle["launch"] == "one + two"
+    assert [r["launch"] for r in bundle["runs"]] == ["one", "two"]
+    # No report and no stream yet, so the model is unknown; the rest is the record's.
+    assert bundle["runs"][0]["arm"].startswith("? · 200 keys · stint ")
+    assert bundle["runs"][1]["arm"].startswith("? · 300 keys · stint ")
+    assert all(r["arm"].endswith(" world") for r in bundle["runs"])
+    # A single launch is still a launch, which is how the watcher calls it.
+    assert [r["label"] for r in replay.build(first)["runs"]] == ["AAAAA"]
 
 
 def test_the_page_is_one_self_contained_file(launch, tmp_path):

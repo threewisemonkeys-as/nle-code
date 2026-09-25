@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rebuild the replay page while the run is still playing.
 
-    .env-venv/bin/python tools/watch.py ~/agent-runs/20260911-054617 \
+    .env-venv/bin/python tools/watch.py ~/agent-runs/20260911-054617 [more launches] \
         --out ~/bai/cc_nle/replay.html --every 900
 
 A 30,000-key run is about twenty hours of wall clock, and a page built at the end of
@@ -41,7 +41,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import replay  # noqa: E402
 
 
-def once(where: Path, out: Path) -> tuple[bool, str]:
+def once(where: Path | list[Path], out: Path) -> tuple[bool, str]:
     """One rebuild. Returns (the run still has budget left, a line about it)."""
     bundle = replay.build(where)
     if not bundle["runs"]:
@@ -57,8 +57,9 @@ def once(where: Path, out: Path) -> tuple[bool, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="watch", description=__doc__.splitlines()[0])
-    parser.add_argument("where", type=Path,
-                        help="a launch directory, or one workspace inside one")
+    parser.add_argument("where", type=Path, nargs="+",
+                        help="launch directories, or workspaces inside them; "
+                             "several put their runs on one page")
     parser.add_argument("--out", type=Path, default=Path("replay.html"))
     parser.add_argument("--every", type=int, default=900,
                         help="seconds between rebuilds (default 900)")
@@ -66,9 +67,10 @@ def main() -> int:
                         help="keep rebuilding after the run has spent its budget")
     args = parser.parse_args()
 
-    where = args.where.expanduser().resolve()
+    where = [one.expanduser().resolve() for one in args.where]
     out = args.out.expanduser().resolve()
-    print(f"watch: {where} -> {out}, every {args.every / 60:.0f} min", flush=True)
+    print(f"watch: {' + '.join(str(one) for one in where)} -> {out}, "
+          f"every {args.every / 60:.0f} min", flush=True)
 
     builds = failures = 0
     while True:

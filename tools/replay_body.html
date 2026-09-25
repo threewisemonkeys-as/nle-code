@@ -18,7 +18,7 @@
 
   <div class="card">
     <header><h2>The runs</h2><span class="hint" id="picker-hint"></span></header>
-    <div class="body" style="padding:0"><table class="matrix" id="matrix"></table></div>
+    <div class="body" style="padding:0;overflow-x:auto"><table class="matrix" id="matrix"></table></div>
   </div>
 
   <div class="card">
@@ -34,13 +34,19 @@
         <button class="tb small on" id="cl-nao" title="real human games from nethack.alt.org">people</button>
         <button class="tb small on" id="cl-bot" title="AutoAscend games from nld-aa-taster">bot</button>
         <button class="tb small on" id="cl-agents" title="individual BALROG NLE episodes">agents</button>
+        <span class="axis-sep">scale</span>
+        <button class="tb small" id="y-fit" title="the y axis fitted to the runs">fit runs</button>
+        <button class="tb small" id="y-full" title="the whole axis, populations and all">full</button>
+        <button class="tb small" id="show-lives" title="a dot for every life">lives</button>
       </span>
       <span class="hint" id="standing-hint"></span>
     </header>
     <div class="body">
       <div class="standing-grid">
         <div>
-          <div class="chart-wrap"><canvas id="chart"></canvas></div>
+          <div class="chart-wrap"><canvas id="chart"></canvas>
+            <div class="chart-tip" id="chart-tip" hidden></div></div>
+          <div class="chart-series" id="chart-series"></div>
           <div class="chart-legend" id="chart-legend"></div>
           <p class="note" id="chart-note"></p>
         </div>
@@ -270,10 +276,76 @@ function clouds() {
   return out;
 }
 
+/* Every run on the page, each in its own colour — the same one its row carries in
+   the table — with the one being shown drawn heavier and on top. Every life a run
+   played is a dot at the point it ended and the score it made; the line is only the
+   upper envelope of those dots. */
+const PALETTE = ["#2a78d6", "#e0542b", "#1f9d55", "#9b59d0", "#c9950c",
+                 "#0e9aa7", "#d6457f", "#7a8b2e", "#5b6ee1", "#a0522d"];
+const view = { fit: false, lives: true };
+let hidden = new Set();   /* labels switched off in the legend */
+let hover = null;         /* the pointer over the chart, in CSS pixels, or null */
+let focus = null;         /* the run whose legend chip is under the pointer */
+let geom = null;          /* the last drawing's scales, for hit-testing */
+/* Per viewer, and only a convenience: storage can be absent or throw. */
+try {
+  const kept = JSON.parse(localStorage.getItem("nle-chart") || "{}");
+  Object.assign(view, kept.view || {});
+  hidden = new Set(kept.hidden || []);
+} catch { /* the defaults stand */ }
+function keep() {
+  try { localStorage.setItem("nle-chart", JSON.stringify({ view, hidden: [...hidden] })); }
+  catch { /* nothing to keep it in */ }
+}
+const colourOf = (r) => PALETTE[DATA.runs.indexOf(r) % PALETTE.length];
+const nameOf = (r) => r.arm || r.label;
+/* The run being shown is always drawn: hiding it would leave the scrubber on nothing. */
+const drawnRuns = () => DATA.runs.filter((r) => r === run || !hidden.has(r.label));
+
+/* The curve a run is drawn as, on whichever axes are chosen. */
+function curveOf(r) {
+  if (!r._turnsBy) index(r);
+  return yaxis === "prog" ? progCurve(r) : (r.curves[axis] || []);
+}
+
+/* A curve is a step function kept at every point where it moves, so its value at x
+   is the last point at or before it. Past a run's end there is none. */
+function valueAt(curve, x) {
+  if (!curve.length || x > curve[curve.length - 1][0]) return null;
+  let v = 0;
+  for (const [px, py] of curve) { if (px <= x) v = py; else break; }
+  return v;
+}
+
+/* Each life: where it ended on both x axes, its score and its rung, and whether it
+   is still being played. Read off the step columns the page already has, so a page
+   built by a builder that predates the dots draws them too. A life is over when a
+   later one began; the last is over only if a death is marked on its last step. */
+function livesOf(r) {
+  if (r._lives) return r._lives;
+  if (!r._turnsBy) index(r);
+  const s = r.steps, byLife = new Map();
+  for (let i = 0; i < s.n.length; i++) {
+    const one = byLife.get(s.life[i]) || { score: 0, prog: 0 };
+    one.last = i;
+    one.score = Math.max(one.score, s.score[i]);
+    one.prog = Math.max(one.prog, s.prog[i]);
+    byLife.set(s.life[i], one);
+  }
+  const deaths = new Set(r.milestones.filter((m) => m.kind === "death").map((m) => m.at));
+  const lives = [...byLife.keys()].sort((a, b) => a - b).map((life, k, all) => {
+    const one = byLife.get(life);
+    return { k, keys: s.n[one.last], turns: r._turnsBy[one.last], score: one.score,
+             prog: one.prog, open: k === all.length - 1 && !deaths.has(one.last) };
+  });
+  r._lives = lives;
+  return lives;
+}
+
 function chartBox() {
   const c = el("chart");
   const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(320, c.clientWidth), h = 340;
+  const w = Math.max(320, c.clientWidth), h = c.clientHeight || 400;
   c.width = w * dpr; c.height = h * dpr;
   const g = c.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -286,22 +358,32 @@ function drawChart() {
   const prog = yaxis === "prog";
   const { g, w, h, pad } = chartBox();
   const cloud = DATA.compare.autoascend.games || [];
-  const mine = prog ? progCurve() : (run.curves[axis] || []);
+  const mine = curveOf(run);
+  /* Over every run on the page and not just the ones drawn, so that switching one
+     off does not rescale the axes under the comparison. */
+  const every = DATA.runs.map(curveOf);
   const xMax = axis === "turns"
-    ? Math.max(1e5, ...mine.map((p) => p[0]))
-    : Math.max(run.budget, 3e4);
+    ? Math.max(1e5, ...every.flatMap((c) => c.map((p) => p[0])))
+    : Math.max(3e4, ...DATA.runs.map((r) => r.budget));
   /* The people's tail is far longer than the bot's — the top human game on this
      archive scores 9.1 billion against AutoAscend's 250,914 — so the ceiling
      lifts a decade when that cloud is in. It still does not reach the very top:
      the dots above it are clipped to the plot box rather than drawn over the
      page, and the note counts them. */
-  const yMax = prog ? 100
-    : (axis === "turns" ? (drawn.nao && naoCloud().length ? 1e6 : (cloud.length ? 3e5 : 1e4)) : 1e4);
+  /* "fit runs" trades the populations' headroom for room between the runs: the
+     top of the highest life, with a little air, instead of the top of the cloud. */
+  const peak = Math.max(1, ...every.flatMap((c) => c.map((p) => p[1])),
+    ...DATA.runs.flatMap((r) => livesOf(r).map((l) => (prog ? l.prog : l.score))));
+  const yMax = view.fit
+    ? (prog ? Math.min(100, Math.max(5, Math.ceil((peak * 1.15) / 5) * 5))
+      : Math.pow(10, Math.max(2, Math.ceil(Math.log10(peak * 1.5)))))
+    : prog ? 100
+      : (axis === "turns" ? (drawn.nao && naoCloud().length ? 1e6 : (cloud.length ? 3e5 : 1e4)) : 1e4);
   const lx = (v) => pad.l + (Math.log10(Math.max(1, v)) / Math.log10(xMax)) * (w - pad.l - pad.r);
   /* Score is log because NetHack scores are Zipfian; progression is linear
      because it is already a probability and 0 to 100 is the whole of it. */
   const ly = prog
-    ? (v) => h - pad.b - (Math.max(0, Math.min(100, v)) / 100) * (h - pad.t - pad.b)
+    ? (v) => h - pad.b - (Math.max(0, Math.min(100, v)) / yMax) * (h - pad.t - pad.b)
     : (v) => h - pad.b - (Math.log10(Math.max(1, v)) / Math.log10(yMax)) * (h - pad.t - pad.b);
 
   g.font = "10px ui-monospace, monospace";
@@ -314,7 +396,8 @@ function drawChart() {
   }
   g.textAlign = "right";
   if (prog) {
-    for (let v = 0; v <= 100; v += 20) {
+    const up = yMax <= 10 ? 1 : yMax <= 25 ? 5 : yMax <= 50 ? 10 : 20;
+    for (let v = 0; v <= yMax + 1e-9; v += up) {
       g.beginPath(); g.moveTo(pad.l, ly(v)); g.lineTo(w - pad.r, ly(v)); g.stroke();
       g.fillText(v + "%", pad.l - 6, ly(v) + 3);
     }
@@ -376,7 +459,7 @@ function drawChart() {
      what the metric claims to measure, but no level on the ladder scores more than
      80.68 — so the band above that line is unreachable, and saying so is the
      difference between a chart with headroom and a chart with a lie in it. */
-  if (prog && DATA.compare.ceiling) {
+  if (prog && DATA.compare.ceiling && DATA.compare.ceiling <= yMax) {
     const y = ly(DATA.compare.ceiling);
     g.strokeStyle = ink("--bad"); g.setLineDash([2, 4]); g.lineWidth = 1;
     g.beginPath(); g.moveTo(pad.l, y); g.lineTo(w - pad.r, y); g.stroke();
@@ -406,7 +489,7 @@ function drawChart() {
     /* The other agents, measured on this exact ladder by the people who built
        it. Horizontal, because a board entry is a mean over episodes and has no
        position along either x axis. */
-    for (const row of DATA.compare.board.slice(0, 4)) {
+    for (const row of DATA.compare.board.slice(0, 4).filter((b) => b.prog <= yMax)) {
       const y = ly(row.prog);
       g.strokeStyle = ink("--ink-3"); g.setLineDash([3, 3]); g.lineWidth = 1;
       g.beginPath(); g.moveTo(pad.l, y); g.lineTo(w - pad.r, y); g.stroke();
@@ -416,7 +499,7 @@ function drawChart() {
     }
   } else {
     /* The published medians, as crosshairs. The human one is the line to beat. */
-    for (const row of DATA.compare.published) {
+    for (const row of DATA.compare.published.filter((p) => p.score <= yMax)) {
       const x = lx(axis === "turns" ? row.turns : row.keys), y = ly(row.score);
       g.strokeStyle = row.human ? ink("--warn") : ink("--ink-3");
       g.setLineDash([3, 3]); g.lineWidth = 1;
@@ -430,34 +513,220 @@ function drawChart() {
     }
   }
 
-  /* This run, at every step of the way. */
-  if (mine.length) {
-    g.strokeStyle = ink("--act"); g.lineWidth = 2.4; g.beginPath();
-    mine.forEach(([x, y], i) => (i ? g.lineTo(lx(x), ly(y)) : g.moveTo(lx(x), ly(y))));
+  /* Every run, the one being shown last so it lies on top. Clipped to the plot,
+     because on "fit runs" the populations and the board's lines run past it. */
+  geom = { lx, ly, pad, w, h,
+           x: (px) => Math.pow(10, ((px - pad.l) / (w - pad.l - pad.r)) * Math.log10(xMax)) };
+  const runs = drawnRuns();
+  const lit = focus || (hover && hover.run) || null;
+  const dim = (r) => (lit && r.label !== lit ? 0.18 : 1);
+  const order = runs.filter((r) => r !== run).concat([run]);
+  g.save();
+  g.beginPath(); g.rect(pad.l, pad.t - 4, w - pad.l - pad.r, h - pad.t - pad.b + 8); g.clip();
+  for (const r of order) {
+    const curve = curveOf(r);
+    if (!curve.length) continue;
+    g.strokeStyle = colourOf(r);
+    g.lineWidth = r === run ? 2.6 : 1.6;
+    g.globalAlpha = dim(r) * (r === run ? 1 : 0.85);
+    g.beginPath();
+    curve.forEach(([x, y], i) => (i ? g.lineTo(lx(x), ly(y)) : g.moveTo(lx(x), ly(y))));
     g.stroke();
-    const here = axis === "turns" ? turnsAt(at) : run.steps.n[at];
-    let value = 0;
-    for (const [x, y] of mine) { if (x <= here) value = y; else break; }
-    g.fillStyle = ink("--act");
-    g.beginPath(); g.arc(lx(here), ly(value), 4.5, 0, 7); g.fill();
   }
+  /* Each life as a dot: filled where it ended, hollow where it is still being played. */
+  const dots = [];
+  if (view.lives) {
+    for (const r of order) {
+      for (const life of livesOf(r)) {
+        const px = lx(axis === "turns" ? life.turns : life.keys);
+        const py = ly(prog ? life.prog : life.score);
+        dots.push({ run: r, life, px, py });
+        g.globalAlpha = dim(r) * (r === run ? 0.95 : 0.45);
+        g.fillStyle = g.strokeStyle = colourOf(r);
+        g.lineWidth = 1.4;
+        g.beginPath(); g.arc(px, py, r === run ? 3.6 : 2.4, 0, 7);
+        life.open ? g.stroke() : g.fill();
+      }
+    }
+  }
+  geom.dots = dots;
+  g.globalAlpha = 1;
+  /* Where the scrubber is, so the chart and the trajectory are the same object. */
+  if (mine.length) {
+    const here = axis === "turns" ? turnsAt(at) : run.steps.n[at];
+    const value = valueAt(mine, here) ?? mine[mine.length - 1][1];
+    g.fillStyle = colourOf(run);
+    g.beginPath(); g.arc(lx(here), ly(value), 4.5, 0, 7); g.fill();
+    g.strokeStyle = ink("--panel"); g.lineWidth = 1.5; g.stroke();
+  }
+  /* The pointer: a rule down the plot and a ring on each line it crosses. */
+  if (hover && hover.px >= pad.l && hover.px <= w - pad.r) {
+    const x = geom.x(hover.px);
+    g.strokeStyle = ink("--ink-2"); g.globalAlpha = 0.45; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(hover.px, pad.t); g.lineTo(hover.px, h - pad.b); g.stroke();
+    g.globalAlpha = 1;
+    for (const r of runs) {
+      const v = valueAt(curveOf(r), x);
+      if (v === null) continue;
+      g.strokeStyle = colourOf(r); g.fillStyle = ink("--panel"); g.lineWidth = 2;
+      g.beginPath(); g.arc(hover.px, ly(v), 3.5, 0, 7); g.fill(); g.stroke();
+    }
+  }
+  g.restore();
+}
+
+/* ── the chart under the pointer ──────────────────────────────────────── */
+/* What the pointer is over: a life's dot within reach, else the line nearest it
+   vertically at that x, else only the x itself. */
+function hitTest(px, py) {
+  if (!geom) return null;
+  const { pad, w, h } = geom;
+  if (px < pad.l || px > w - pad.r || py < pad.t - 6 || py > h - pad.b + 6) return null;
+  const x = geom.x(px);
+  let best = null, bestD = 7;
+  for (const d of geom.dots || []) {
+    const dd = Math.hypot(d.px - px, d.py - py);
+    if (dd < bestD) { best = d; bestD = dd; }
+  }
+  if (best) return { x, run: best.run, dot: best };
+  let near = null, gap = 12;
+  for (const r of drawnRuns()) {
+    const v = valueAt(curveOf(r), x);
+    if (v === null) continue;
+    const dy = Math.abs(geom.ly(v) - py);
+    if (dy < gap) { near = r; gap = dy; }
+  }
+  return { x, run: near };
+}
+
+function tip(hit) {
+  const box = el("chart-tip");
+  if (!hit) { box.hidden = true; return; }
+  const prog = yaxis === "prog";
+  const swatch = (r) => `<i style="background:${colourOf(r)}"></i>`;
+  const unit = axis === "turns" ? "turn" : "key";
+  const said = (v) => (prog ? `${(+v).toFixed(2)}%` : comma(v));
+  let html;
+  if (hit.dot) {
+    const { run: r, life } = hit.dot;
+    html = `<div class="tip-head">${swatch(r)}${esc(nameOf(r))}</div>` +
+      `<div>life ${life.k + 1} — <b>${comma(life.score)}</b> points, ` +
+      `progression <b>${life.prog.toFixed(2)}%</b></div>` +
+      `<div class="tip-dim">${life.open ? "still going at" : "ended at"} ` +
+      `${unit} ${comma(axis === "turns" ? life.turns : life.keys)}</div>` +
+      `<div class="tip-dim">click to ${r === run ? "jump to its end" : "open this run there"}</div>`;
+  } else {
+    const rows = drawnRuns()
+      .map((r) => ({ r, v: valueAt(curveOf(r), hit.x) }))
+      .filter((o) => o.v !== null)
+      .sort((a, b) => b.v - a.v);
+    html = `<div class="tip-head">${unit} ${comma(Math.round(hit.x))} · ` +
+      `${prog ? "best rung" : "best life"} so far</div>` +
+      rows.map(({ r, v }) =>
+        `<div class="${hit.run === r ? "tip-lit" : ""}">${swatch(r)}` +
+        `<span class="tip-name">${esc(nameOf(r))}</span><b>${said(v)}</b></div>`).join("") +
+      (rows.length ? "" : `<div class="tip-dim">every run had ended by here</div>`) +
+      `<div class="tip-dim">click to ${hit.run && hit.run !== run
+        ? "open the highlighted run" : "move the scrubber here"}</div>`;
+  }
+  box.innerHTML = html;
+  box.hidden = false;
+  const wrap = el("chart").getBoundingClientRect();
+  const bw = box.offsetWidth, bh = box.offsetHeight;
+  const left = hover.px + 14 + bw > wrap.width ? hover.px - 14 - bw : hover.px + 14;
+  box.style.left = Math.max(0, left) + "px";
+  box.style.top = Math.max(0, Math.min(wrap.height - bh, hover.py - bh / 2)) + "px";
+}
+
+/* The first step of the run being shown at or past x, on whichever axis is chosen. */
+function jumpTo(x) {
+  const col = axis === "turns" ? run._turnsBy : run.steps.n;
+  let i = col.findIndex((v) => v >= x);
+  if (i < 0) i = col.length - 1;
+  stop();
+  show(i);
+}
+
+function wireChart() {
+  const c = el("chart");
+  c.addEventListener("pointermove", (e) => {
+    const r = c.getBoundingClientRect();
+    const px = e.clientX - r.left, py = e.clientY - r.top;
+    const hit = hitTest(px, py);
+    hover = hit ? { px, py, run: hit.run ? hit.run.label : null } : null;
+    c.style.cursor = hit && (hit.run || hit.dot) ? "pointer" : hit ? "crosshair" : "default";
+    drawChart();
+    tip(hit);
+  });
+  c.addEventListener("pointerleave", () => { hover = null; tip(null); drawChart(); });
+  c.addEventListener("click", (e) => {
+    const r = c.getBoundingClientRect();
+    const hit = hitTest(e.clientX - r.left, e.clientY - r.top);
+    if (!hit) return;
+    const x = hit.dot ? (axis === "turns" ? hit.dot.life.turns : hit.dot.life.keys) : hit.x;
+    if (hit.run && hit.run !== run) pick(DATA.runs.indexOf(hit.run));
+    jumpTo(x);
+  });
+  const sync = () => {
+    el("y-fit").classList.toggle("on", view.fit);
+    el("y-full").classList.toggle("on", !view.fit);
+    el("show-lives").classList.toggle("on", view.lives);
+  };
+  el("y-fit").addEventListener("click", () => { view.fit = true; sync(); keep(); drawChart(); });
+  el("y-full").addEventListener("click", () => { view.fit = false; sync(); keep(); drawChart(); });
+  el("show-lives").addEventListener("click", () => {
+    view.lives = !view.lives; sync(); keep(); drawChart(); buildLegend();
+  });
+  sync();
+}
+
+/* One chip a run: its colour, its name, its best and mean life. A click switches it
+   on or off; a double click opens it; pointing at one lights its line. Built on a
+   pick and a toggle only — not on every step, which would drop the pointer. */
+function buildSeries() {
+  el("chart-series").innerHTML = DATA.runs.map((r) => {
+    const off = r !== run && hidden.has(r.label);
+    const ended = r.scores.filter((s, k) => k < r.lives - 1);
+    const mean = ended.length ? Math.round(ended.reduce((a, b) => a + b, 0) / ended.length) : 0;
+    return `<button class="series-chip${r === run ? " shown" : ""}${off ? " off" : ""}" ` +
+      `data-label="${esc(r.label)}" title="${esc(nameOf(r))} (${esc(r.label)}) — ${r === run ? "the run being shown"
+        : off ? "click to draw it · double-click to open it"
+        : "click to hide it · double-click to open it"}">` +
+      `<i style="background:${colourOf(r)}"></i><span>${esc(nameOf(r))}</span>` +
+      `<em>best ${comma(r.best)} · mean ${comma(mean)} · ${(r.progression || {}).best ?? "—"}%</em>` +
+      `</button>`;
+  }).join("");
+  el("chart-series").querySelectorAll(".series-chip").forEach((chip) => {
+    const label = chip.dataset.label;
+    chip.addEventListener("click", () => {
+      if (label === run.label) return;
+      hidden.has(label) ? hidden.delete(label) : hidden.add(label);
+      keep(); buildSeries(); drawChart();
+    });
+    chip.addEventListener("dblclick", () => {
+      hidden.delete(label); keep();
+      pick(DATA.runs.findIndex((r) => r.label === label));
+    });
+    chip.addEventListener("pointerenter", () => { focus = label; drawChart(); });
+    chip.addEventListener("pointerleave", () => { focus = null; drawChart(); });
+  });
 }
 
 /* The best rung reached by each point, against whichever x is chosen. Built
    here rather than in the bundle because it is a running maximum over a column
    the page already has, and the score curves are thinned in Python only because
    they are drawn against a population that had to be thinned with them. */
-function progCurve() {
-  if (run._prog && run._prog.axis === axis) return run._prog.pairs;
+function progCurve(r) {
+  if (r._prog && r._prog.axis === axis) return r._prog.pairs;
   const pairs = [];
   let best = 0, lastX = -1;
-  for (let i = 0; i < run.steps.n.length; i++) {
-    best = Math.max(best, run.steps.prog[i]);
-    const x = axis === "turns" ? run._turnsBy[i] : run.steps.n[i];
+  for (let i = 0; i < r.steps.n.length; i++) {
+    best = Math.max(best, r.steps.prog[i]);
+    const x = axis === "turns" ? r._turnsBy[i] : r.steps.n[i];
     if (x === lastX && pairs.length) pairs[pairs.length - 1][1] = best;
     else { pairs.push([x, best]); lastX = x; }
   }
-  run._prog = { axis, pairs };
+  r._prog = { axis, pairs };
   return pairs;
 }
 
@@ -467,6 +736,13 @@ function turnsAt(i) {
   return run._turnsBy[i];
 }
 
+const LIVES_KEY = () => (view.lives
+  ? `<span><i class="life"></i>one life, where it ended</span>` +
+    `<span><i class="life open"></i>the life still going</span>` : "") +
+  (DATA.runs.length > 1
+    ? `<span><i style="background:var(--ink-3)"></i>the other ` +
+      `${plural(DATA.runs.length - 1, "run")} on this page, in their table colours</span>` : "");
+
 function buildLegend() {
   const bot = DATA.compare.autoascend.score;
   const prog = yaxis === "prog";
@@ -475,7 +751,7 @@ function buildLegend() {
     const nao = DATA.compare.nao || {};
     const eps = DATA.compare.agents || [];
     el("chart-legend").innerHTML =
-      `<span><i style="background:${ink("--act")}"></i>this run — ` +
+      `<span><i style="background:${colourOf(run)}"></i>this run — ` +
       `${progSoFar(at)}% reached by here, ${p.best}% best life</span>` +
       (axis === "turns" && drawn.nao && nao.games
         ? `<span><i class="people"></i>${comma(nao.games)} human games ` +
@@ -489,7 +765,7 @@ function buildLegend() {
       (drawn.agents && eps.length
         ? `<span><i class="peer"></i>${comma(eps.length)} BALROG episodes — exact</span>`
         : "") +
-      `<span><i class="dash"></i>the board's means, on this same ladder</span>`;
+      `<span><i class="dash"></i>the board's means, on this same ladder</span>` + LIVES_KEY();
     el("chart-note").innerHTML =
       `<b>Progression against ${axis === "turns" ? "game turns" : "keystrokes"}</b>.
        The rung is the probability that a human player went on to <i>ascend</i>, given
@@ -538,7 +814,7 @@ function buildLegend() {
   }
   const nao = DATA.compare.nao || {};
   el("chart-legend").innerHTML =
-    `<span><i style="background:${ink("--act")}"></i>this run — best life so far ` +
+    `<span><i style="background:${colourOf(run)}"></i>this run — best life so far ` +
     `${comma(bestSoFar(at))} points</span>` +
     (axis === "turns" && drawn.nao && nao.games
       ? `<span><i class="people"></i>${comma(nao.games)} human games ` +
@@ -546,7 +822,7 @@ function buildLegend() {
     (axis === "turns" && drawn.bot && bot.n
       ? `<span><i class="cloud"></i>${comma(bot.n)} AutoAscend games on this disk</span>`
       : "") +
-    `<span><i class="human"></i>median human game (836 points)</span>`;
+    `<span><i class="human"></i>median human game (836 points)</span>` + LIVES_KEY();
   el("chart-note").innerHTML = axis === "turns"
     ? `<b>Score against game turns</b>, both on log axes, because NetHack scores are
        Zipfian — the human median is 836 and the human mean is 127,218. Turns is the
@@ -1013,12 +1289,13 @@ function pick(i) {
       ? `<div class="files">it also wrote ${run.files.map(esc).join(", ")}</div>` : "");
   buildBaselines();
   buildBoard();
+  buildSeries();
   show(0);
   requestAnimationFrame(() => { drawTrack(); drawChart(); });
 }
 
 function buildMatrix() {
-  const head = ["run", "character", "keys", "turns", "turns/key", "best life",
+  const head = ["run", "arm", "character", "keys", "turns", "turns/key", "best life",
                 "mean", "prog", "dlvl", "xp", "lives", "wasted", "sessions", "cost"];
   const rows = [`<tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr>`];
   DATA.runs.forEach((r, i) => {
@@ -1035,7 +1312,9 @@ function buildMatrix() {
     rows.push(
       `<tr data-i="${i}" title="workspace ${esc(r.label)}">` +
       `<td><span class="dot ${clean ? "" : leaked ? "critical" : "warning"}"></span>` +
-      `${esc(r.label)}</td>` +
+      /* The colour its line and its lives are drawn in, on the chart below. */
+      `<i class="swatch" style="background:${colourOf(r)}"></i>` +
+      `${esc(r.label)}</td><td>${esc(r.arm || "")}</td>` +
       `<td>${esc(r.role)}</td><td>${comma(r.used)}</td><td>${comma(r.turns)}</td>` +
       `<td>${(r.turns / Math.max(1, r.used)).toFixed(2)}</td>` +
       `<td>${comma(r.best)}</td><td>${comma(mean)}</td>` +
@@ -1147,5 +1426,6 @@ el("footer").innerHTML = `
   budget and changed nothing, and the amber ticks under the track are where they went.</p>`;
 
 buildMatrix();
+wireChart();
 pick(0);
 </script>
