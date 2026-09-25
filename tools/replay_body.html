@@ -996,13 +996,15 @@ function pick(i) {
   el("slider").max = String(run.steps.n.length - 1);
   el("run-title").textContent = `${run.label} — ${run.role || "?"}`;
   const clean = !Object.keys((run.audit || {}).findings || {}).length;
+  const leaked = !clean && (!run.audit.leaks || Object.keys(run.audit.leaks).length > 0);
   el("run-hint").textContent =
     `${run.blind ? "blind" : "named"} · seed ${run.seed} · ` +
     `${comma(run.used)} of ${comma(run.budget)} keys · ${comma(run.turns)} turns · ` +
     `best life ${comma(run.best)} · dlvl ${run.depth} · ` +
     `progression ${(run.progression || {}).best ?? "—"}% · ` +
     (run.audit && Object.keys(run.audit).length
-      ? `audit ${clean ? "clean" : "FLAGGED"}` : "audit pending");
+      ? `audit ${clean ? "clean" : leaked ? "LEAKED" : "attempted, nothing leaked"}`
+      : "audit pending");
   el("hand-key").hidden = !run.handovers.length;
   el("notes").innerHTML = (run.notes
     ? `<pre class="code">${esc(run.notes)}</pre>`
@@ -1023,10 +1025,17 @@ function buildMatrix() {
     const ended = r.scores.filter((s, k) => k < r.lives - 1);
     const mean = ended.length
       ? Math.round(ended.reduce((a, b) => a + b, 0) / ended.length) : 0;
-    const clean = !Object.keys((r.audit || {}).findings || {}).length;
+    /* Yellow when the session tried to reach past the game and got nothing back,
+       red when something came back. A report from before the audit read outputs has
+       findings and no `leaks` at all: it was never asked whether anything got
+       through, so it keeps the old red. */
+    const audit = r.audit || {};
+    const clean = !Object.keys(audit.findings || {}).length;
+    const leaked = !clean && (!audit.leaks || Object.keys(audit.leaks).length > 0);
     rows.push(
       `<tr data-i="${i}" title="workspace ${esc(r.label)}">` +
-      `<td><span class="dot ${clean ? "" : "critical"}"></span>${esc(r.label)}</td>` +
+      `<td><span class="dot ${clean ? "" : leaked ? "critical" : "warning"}"></span>` +
+      `${esc(r.label)}</td>` +
       `<td>${esc(r.role)}</td><td>${comma(r.used)}</td><td>${comma(r.turns)}</td>` +
       `<td>${(r.turns / Math.max(1, r.used)).toFixed(2)}</td>` +
       `<td>${comma(r.best)}</td><td>${comma(mean)}</td>` +

@@ -149,6 +149,7 @@ table.matrix tr.on td { background: var(--act-soft); }
 table.matrix tr.on td:first-child { box-shadow: inset 3px 0 0 var(--act); }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
        margin-right: 7px; background: var(--good); }
+.dot.warning { background: var(--warn); }
 .dot.critical { background: var(--bad); }
 
 /* ── where this sits ────────────────────────────────────────────────────── */
