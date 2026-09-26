@@ -214,6 +214,7 @@ class NleGame:
         seed: int = 0,
         obs: tuple[str, ...] = DEFAULT_CHANNELS,
         fresh_world: bool = True,
+        character: str = "@",
         blind: bool = True,
         savedir: str | None = None,
     ) -> None:
@@ -238,10 +239,16 @@ class NleGame:
         self.seed = seed
         self.channels = channels
         self.fresh_world = fresh_world
+        self.character = character
         self.blind = blind
         self.spec = _spec(variant)
 
         kwargs = dict(self.spec.kwargs)
+        # "@" rolls the character from the seed, as the Challenge does. Anything else
+        # is NetHack's own role-race-gender-alignment spec ("val-dwa-fem-law"), and
+        # pins the character while the seed still deals the dungeon — so a fresh
+        # world with a fixed character is a new map for the same hero every life.
+        kwargs["character"] = character
         if savedir:
             # NetHack's own recording of the game, in the format `ttyplay` reads,
             # plus the xlogfile it writes when a game ends (F16). Harness-side: it
@@ -405,7 +412,7 @@ class NleGame:
             # worth a good deal less than a name.
             return ""
         core, disp = self._seeds(life)
-        twin = tasks.NetHackScore(**self.spec.kwargs)
+        twin = tasks.NetHackScore(**(self.spec.kwargs | {"character": self.character}))
         try:
             twin.seed(core, disp, False)
             twin.reset()

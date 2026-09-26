@@ -139,6 +139,7 @@ def screens(record: dict) -> tuple[list, dict, dict, list]:
         seed=record["seed"],
         obs=("tty",),
         fresh_world=record["fresh_world"],
+        character=record.get("character", "@"),
         blind=record.get("blind", True),
     )
     was_text = [" " * COLS] * ROWS

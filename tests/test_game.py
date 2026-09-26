@@ -162,6 +162,20 @@ def test_a_new_game_is_dealt_on_restart_by_default():
     made.close()
 
 
+def test_a_pinned_character_is_dealt_every_life_in_a_new_dungeon():
+    """`character` fixes the hero and leaves the dungeon to the seed: seed 0 rolls a
+    Priest and a Tourist, and both lives here are the Valkyrie asked for, with the
+    role read from the same pinned character when the welcome is off screen."""
+    made = NleGame(seed=0, character="val-dwa-fem-law")
+    maps = []
+    for _ in range(3):
+        maps.append(made._obs["chars"].tobytes())
+        made.restart()
+    assert [e.role for e in made.episodes[:3]] == ["lawful dwarven Valkyrie"] * 3
+    assert len(set(maps)) == 3, "a pinned character should still get new dungeons"
+    made.close()
+
+
 def test_a_life_that_ends_is_named_in_nethacks_own_vocabulary():
     """Wandering into the dungeon eventually kills you, and how it did is recorded."""
     made = NleGame(seed=7)

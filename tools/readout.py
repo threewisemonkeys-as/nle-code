@@ -61,6 +61,7 @@ def replay(record: dict) -> list[dict]:
         seed=record["seed"],
         obs=("tty",),
         fresh_world=record["fresh_world"],
+        character=record.get("character", "@"),
         blind=record.get("blind", True),
     )
     rows = []

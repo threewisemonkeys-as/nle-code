@@ -89,6 +89,9 @@ class RunState(BaseModel):
     seed: int = 0
     obs: list[str] = list(DEFAULT_CHANNELS)
     fresh_world: bool = True
+    # "@" rolls one per life; otherwise NetHack's role-race-gender-alignment spec,
+    # whose shape is the game's own, so it is `PRIVATE` like `variant`.
+    character: str = "@"
     # Whether the game is allowed to name itself in the observations. Off by
     # default: the opening screen says `welcome to NetHack!` and so does `v`, and a
     # session that was not told what it is playing should not be told by the first
@@ -148,7 +151,7 @@ class RunState(BaseModel):
     # nothing. What the run *is* lives in the record beside the environment, which
     # is also where `pick_up` reads it back from.
     PRIVATE: ClassVar[set[str]] = {
-        "env_dir", "variant", "blind", "episodes", "score", "max_depth",
+        "env_dir", "variant", "character", "blind", "episodes", "score", "max_depth",
         "max_xplevel", "unique_cells", "turns", "deaths", "quits", "reward",
     }
 
@@ -374,6 +377,7 @@ class Session:
             seed=state.seed,
             obs=tuple(state.obs),
             fresh_world=state.fresh_world,
+            character=state.character,
             blind=state.blind,
             # NetHack's own recording of every life, in the format its `ttyplay`
             # reads, plus the xlogfile it writes when a game ends (F16). Beside the
@@ -750,6 +754,7 @@ def start(ws: Path, args: argparse.Namespace, env_dir: Path) -> Session:
         seed=args.seed,
         obs=list(args.obs),
         fresh_world=args.fresh_world,
+        character=args.character,
         blind=not args.named,
         budget=args.budget or DEFAULT_BUDGET[args.variant],
         env_dir=str(env_dir),
@@ -790,6 +795,7 @@ def pick_up(ws: Path, args: argparse.Namespace, env_dir: Path) -> Session:
         seed=was["seed"],
         obs=list(was["obs"]),
         fresh_world=was["fresh_world"],
+        character=was.get("character", "@"),
         blind=bool(was.get("blind", True)),
         budget=args.budget or was["budget"],
         env_dir=str(env_dir),
@@ -927,6 +933,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     # the world rule for itself — which is how the two ends come apart when a
     # default moves. Say it either way and the daemon's own default never applies.
     argv.append("--fresh-world" if args.fresh_world else "--same-world")
+    argv += ["--character", args.character]
     if args.named:
         argv.append("--named")
     if args.resume:
@@ -988,6 +995,10 @@ def build_parser() -> argparse.ArgumentParser:
                            help="deal this one character and dungeon again every life, "
                                 "so a route or a saved opening carries across deaths")
         p.set_defaults(fresh_world=True)
+        p.add_argument("--character", default="@",
+                       help="NetHack's role-race-gender-alignment spec, e.g. "
+                            "val-dwa-fem-law, dealt every life. The default '@' "
+                            "rolls a new one from each life's seed")
         p.add_argument("--named", action="store_true",
                        help="let the game name itself in the observations. The "
                             "default redacts that one word, because a session that "
